@@ -1,0 +1,71 @@
+with ash as 
+(
+  select *
+  from   gv$active_session_history
+  where  module = 'LNMOD_LOANSNAPSHOT-EXTRACT'
+  and    sample_time > to_date('06-29-2015 13:35:00','mm-dd-yyyy hh24:mi:ss')
+  and    sql_id = '1td60s9vpv7sj'
+),
+a0 as
+(
+  select sql_exec_id, sql_exec_start, sql_id, sql_plan_line_id, 
+         sql_plan_operation || ' ' || sql_plan_options sql_plan,
+         module, action,
+         event, session_state, sample_time
+  from   ash 
+),
+a1 as
+(
+  SELECT sql_exec_start,
+         lag (sql_exec_start) over (partition by sql_exec_start, sql_exec_id, sql_id, sql_plan_line_id, event, session_state order by sql_exec_start, sql_exec_id, sql_id, sample_time ) lag_sql_exec_start,
+         lead(sql_exec_start) over (partition by sql_exec_start, sql_exec_id, sql_id, sql_plan_line_id, event, session_state order by sql_exec_start, sql_exec_id, sql_id, sample_time ) lead_sql_exec_start,  
+         sql_exec_id,
+         lag (sql_exec_id) over (partition by sql_exec_start, sql_exec_id, sql_id, sql_plan_line_id, event, session_state order by sql_exec_start, sql_exec_id, sql_id, sample_time ) lag_sql_exec_id,
+         lead(sql_exec_id) over (partition by sql_exec_start, sql_exec_id, sql_id, sql_plan_line_id, event, session_state order by sql_exec_start, sql_exec_id, sql_id, sample_time ) lead_sql_exec_id,  
+         sql_id, 
+         lag (sql_id) over (partition by sql_exec_start, sql_exec_id, sql_id, sql_plan_line_id,module, action, event, session_state order by sql_exec_start, sql_exec_id, sql_id, sample_time ) lag_sql_id,
+         lead(sql_id) over (partition by sql_exec_start, sql_exec_id, sql_id, sql_plan_line_id,module, action, event, session_state order by sql_exec_start, sql_exec_id, sql_id, sample_time ) lead_sql_id,  
+         sql_plan_line_id, 
+         lag (sql_plan_line_id) over (partition by sql_exec_start, sql_exec_id, sql_id, sql_plan_line_id,module, action, event, session_state order by sql_exec_start, sql_exec_id, sql_id, sample_time ) lag_sql_plan_line_id,
+         lead(sql_plan_line_id) over (partition by sql_exec_start, sql_exec_id, sql_id, sql_plan_line_id,module, action, event, session_state order by sql_exec_start, sql_exec_id, sql_id, sample_time ) lead_sql_plan_line_id,  
+         sql_plan,
+         lag (sql_plan) over (partition by sql_exec_start, sql_exec_id, sql_id, sql_plan_line_id,module, action, event, session_state order by sql_exec_start, sql_exec_id, sql_id, sample_time ) lag_sql_plan,
+         lead(sql_plan) over (partition by sql_exec_start, sql_exec_id, sql_id, sql_plan_line_id,module, action, event, session_state order by sql_exec_start, sql_exec_id, sql_id, sample_time ) lead_sql_plan,
+         module,
+         lag (module) over (partition by sql_exec_start, sql_exec_id, sql_id, sql_plan_line_id,module, action, event, session_state order by sql_exec_start, sql_exec_id, sql_id, sample_time ) lag_module,
+         lead(module) over (partition by sql_exec_start, sql_exec_id, sql_id, sql_plan_line_id,module, action, event, session_state order by sql_exec_start, sql_exec_id, sql_id, sample_time ) lead_module,  
+         action,
+         lag (action) over (partition by sql_exec_start, sql_exec_id, sql_id, sql_plan_line_id,module, action, event, session_state order by sql_exec_start, sql_exec_id, sql_id, sample_time ) lag_action,
+         lead(action) over (partition by sql_exec_start, sql_exec_id, sql_id, sql_plan_line_id,module, action, event, session_state order by sql_exec_start, sql_exec_id, sql_id, sample_time ) lead_action,  
+         event,
+         lag (event) over (partition by sql_exec_start, sql_exec_id, sql_id, sql_plan_line_id,module, action, event, session_state order by sql_exec_start, sql_exec_id, sql_id, sample_time ) lag_event,
+         lead(event) over (partition by sql_exec_start, sql_exec_id, sql_id, sql_plan_line_id,module, action, event, session_state order by sql_exec_start, sql_exec_id, sql_id, sample_time ) lead_event,  
+         session_state,
+         lag (session_state) over (partition by sql_exec_start, sql_exec_id, sql_id, sql_plan_line_id,module, action, event, session_state order by sql_exec_start, sql_exec_id, sql_id, sample_time ) lag_session_state,
+         lead(session_state) over (partition by sql_exec_start, sql_exec_id, sql_id, sql_plan_line_id,module, action, event, session_state order by sql_exec_start, sql_exec_id, sql_id, sample_time ) lead_session_state,  
+         sample_time,
+         lag (sample_time)  over (partition by sql_exec_start, sql_exec_id, sql_id, sql_plan_line_id, module, action,event, session_state order by sql_exec_start, sql_exec_id, sql_id, sample_time ) lag_sample_time,
+         lead(sample_time)  over (partition by sql_exec_start, sql_exec_id, sql_id, sql_plan_line_id, module, action,event, session_state order by sql_exec_start, sql_exec_id, sql_id, sample_time ) lead_sample_time
+  FROM   a0
+),
+a2 as 
+(
+  SELECT sql_exec_start, sql_exec_id, sql_id,  sql_plan_line_id, sql_plan, module, action, event, session_state,
+         lag_sample_time, sample_time 
+  FROM   a1
+  WHERE  ( lag_sql_exec_id is null        and  lag_sql_exec_start is null           and  lag_sql_id is null    and  lag_sql_plan_line_id is null             and  lag_sql_plan is null     and  lag_module is null   and  lag_action is null  and   lag_event is null  and  lag_session_state is null )
+  OR     (lead_sql_exec_id is null        and lead_sql_exec_start is null           and lead_sql_id is null    and lead_sql_plan_line_id is null             and lead_sql_plan is null     and lead_module is null   and lead_action is null  and  lead_event is null  and lead_session_state is null )
+  OR     ( lag_sql_exec_id <> sql_exec_id and  lag_sql_exec_start <> sql_exec_start and  lag_sql_id <> sql_id  and  lag_sql_plan_line_id <> sql_plan_line_id and  lag_sql_plan <> sql_plan and  lag_module <> module and  lag_action <> action and  lag_event <> event and  lag_session_state <> session_state )
+  OR     (lead_sql_exec_id <> sql_exec_id and lead_sql_exec_start <> sql_exec_start and lead_sql_id <> sql_id  and lead_sql_plan_line_id <> sql_plan_line_id and lead_sql_plan <> sql_plan and lead_module <> module and lead_action <> action and lead_event <> event and lead_session_state <> session_state )
+)
+select sql_exec_start, sql_exec_id, sql_id,  sql_plan_line_id, sql_plan, module, action, event, session_state, sample_time, st, diff
+from   a0
+model return updated rows
+partition by (sql_exec_start, sql_exec_id, sql_id,  sql_plan_line_id, sql_plan, module, action, event, session_state)
+dimension by (sample_time)
+measures (sample_time st, 0 diff)
+rules 
+  (
+    diff[any] = count(sample_time)
+  )
+order by sample_time

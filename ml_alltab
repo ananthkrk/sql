@@ -1,0 +1,373 @@
+set serveroutput on size unlimited
+set feedback off;
+
+declare
+
+  type colformat is record
+  (
+      col_name     varchar2(35),
+      col_datatype varchar2(35),
+      col_format   varchar2(35)
+  );
+  
+  type t_colformat is table of colformat;
+  tbl_colformat   t_colformat := t_colformat();
+  
+
+  pi_schname      varchar2(35)           :=  'MDXHUB_VW_CURR';
+  pi_tabname      varchar2(35)           :=  'V_ALS_REIPDALSACTDLY' ;
+  pi_colname      varchar2(32765)        :=  '*'                    ;
+  
+    --CHMSTR
+--  pi_colformats   sys.dbms_debug_vc2coll :=  sys.dbms_debug_vc2coll(  'PURPTD,DATE,YYYYMM'
+--                                                                     ,'LACDTE,DATE,YYYYMMDD'
+--                                                                     ,'INTPTD,DATE,YYYYMMDD'
+--                                                                     ,'LADTCL,DATE,YYYYMMDD'
+--                                                                     ,'ESPYCD,DATE,YYYYMM'
+--                                                                     ,'ASMPDT,DATE,YYYYMM'
+--                                                                     ,'ORIGDT,DATE,YYYYMMDD'
+--                                                                     ,'APPRDT,DATE,YYYYMM'
+--                                                                     ,'MATDTE,DATE,YYYYMM'
+--                                                                     ,'CPEXDT,DATE,YYYYMM'
+--                                                                     ,'OLDCM#,DATE,YYYYMM'
+--                                                                     ,'WHPHDT,DATE,YYYYMMDD'
+--                                                                     ,'LADFEE,DATE,YYYYMMDD'
+--                                                                     ,'DTEMTG,DATE,YYYYMMDD'
+--                                                                     ,'ASGNDT,DATE,YYYYMMDD'
+--                                                                     ,'MRTCDT,DATE,YYYYMMDD'
+--                                                                     ,'FSTDUE,DATE,YYYYMM'
+--                                                                  ); 
+  --V_ALS_REIPDALSACTDLY
+  pi_colformats   sys.dbms_debug_vc2coll :=  sys.dbms_debug_vc2coll(  'DUEDT,DATE,YYYYMMDD'
+                                                                     ,'ACCTOPNDT,DATE,YYYYMMDD'
+                                                                     ,'CHGOFFDT,DATE,YYYYMMDD'
+                                                                     ,'LSTPMTDT,DATE,YYYYMMDD'
+                                                                     ,'DRAWENDDATE,DATE,YYYYMMDD'
+                                                                  );                                   
+                               
+  cursor cr_alltabcols
+  is     
+    with
+    cols as
+    (
+       select  trim(regexp_substr(t.str,'[^,]+',1,level)) colname
+       from    (select pi_colname str from dual) t
+       where   pi_colname <> '*'
+       connect by instr(t.str,',',1, level - 1) > 0
+       union
+       select  column_name
+       from    dba_tab_columns
+       where   owner      = pi_schname
+       and     table_name = pi_tabname
+       and     pi_colname = '*'  
+    ), 
+    tc as
+    (
+        select  c.owner, c.table_name, c.column_name, 
+                c.column_id, c.data_type, 
+                c.data_length, c.data_scale, c.data_precision,
+                c.num_distinct, c.nullable,
+                c.data_default,
+                o.comments
+        from    dba_tab_columns c
+                left outer join dba_col_comments o on o.owner = c.owner 
+                                                  and o.table_name = c.table_name 
+                                                  and o.column_name = c.column_name  
+        where   c.owner      = pi_schname
+        and     c.table_name = pi_tabname
+        and     c.column_name in ( select colname from cols)
+    ),
+    pk as
+    (
+        select distinct c.owner, c.table_name, cc.column_name
+        from   tc
+               inner join dba_constraints  c on  tc.owner  = c.owner and  tc.table_name  = c.table_name
+               inner join dba_cons_columns cc on c.OWNER = cc.OWNER and c.CONSTRAINT_NAME = cc.CONSTRAINT_NAME and  tc.column_name = cc.column_name
+        where  c.CONSTRAINT_TYPE = 'P'   
+    ),
+    uk as
+    (
+        select distinct c.owner, c.table_name, cc.column_name
+        from   tc
+               inner join dba_constraints  c on  tc.owner  = c.owner and  tc.table_name  = c.table_name
+               inner join dba_cons_columns cc on c.OWNER = cc.OWNER and c.CONSTRAINT_NAME = cc.CONSTRAINT_NAME and  tc.column_name = cc.column_name
+        where  c.CONSTRAINT_TYPE = 'U'   
+    ),
+    fk as
+    (
+        select distinct c.owner, c.table_name, cc.column_name
+        from   tc
+               inner join dba_constraints  c on  tc.owner  = c.owner and  tc.table_name  = c.table_name
+               inner join dba_cons_columns cc on c.OWNER = cc.OWNER and c.CONSTRAINT_NAME = cc.CONSTRAINT_NAME and  tc.column_name = cc.column_name
+        where  c.CONSTRAINT_TYPE = 'R'   
+    ),
+    ck as
+    (
+        select distinct c.owner, c.table_name, cc.column_name
+        from   tc
+               inner join dba_constraints  c on  tc.owner  = c.owner and  tc.table_name  = c.table_name
+               inner join dba_cons_columns cc on c.OWNER = cc.OWNER and c.CONSTRAINT_NAME = cc.CONSTRAINT_NAME and  tc.column_name = cc.column_name
+        where  c.CONSTRAINT_TYPE = 'C'  
+    )
+    select tc.owner, tc.table_name, tc.column_name,
+           tc.owner ||'.'|| tc.table_name || '.'|| tc.column_name cols,
+           tc.data_length,
+           case when tc.data_type like '%CHAR%' or tc.data_type in ('CLOB','LONG') then 1 else 0 end is_char,
+           case when tc.data_type IN ('NUMBER','INTEGER','DECIMAL','FLOAT') then 1 else 0 end is_number,
+           case when tc.data_type in ('DATE','TIME') then 1 else 0 end is_date,
+           case when tc.data_type like '%TIMESTAMP%' then 1 else 0 end is_ts, 
+           case when pk.column_name is not null then 1 else 0 end is_pk,
+           case when uk.column_name is not null then 1 else 0 end is_uk,
+           case when fk.column_name is not null then 1 else 0 end is_fk,
+           case when ck.column_name is not null then 1 else 0 end is_ck,
+           case when nullable = 'Y' then 1 else 0 end is_nullable,
+           case when data_default is not null then 1 else 0 end is_default,
+           num_distinct,
+           nvl(data_precision,0) data_precision, 
+           nvl(data_scale,0) data_scale,
+           null  dt_fmt,
+           upper(tc.comments) as comments
+    from   tc
+           left join pk on tc.owner = pk.owner and tc.table_name = pk.table_name and tc.column_name = pk.column_name
+           left join uk on tc.owner = uk.owner and tc.table_name = uk.table_name and tc.column_name = uk.column_name
+           left join fk on tc.owner = fk.owner and tc.table_name = fk.table_name and tc.column_name = fk.column_name
+           left join ck on tc.owner = ck.owner and tc.table_name = ck.table_name and tc.column_name = ck.column_name
+    order by tc.column_id
+    ;
+    
+  type rc_alltabcols is table of cr_alltabcols%rowtype;
+  t_alltabcols  rc_alltabcols;
+  
+  s_selclause   clob := NULL ;
+  s_frmclause   clob := NULL ; 
+  s_whrclause   clob := NULL ;
+  s_sql         clob := NULL ;
+  s_cteclause   clob := NULL ;
+  s_lcteclause  clob := NULL ;
+  s_index       number  := NULL ;
+  
+  nParallel     Number := 16 ;
+  cr  sys_refcursor;
+
+   procedure printout(p_clob in clob) 
+   is
+     offset      number          := 1               ;
+     amount      number          := 31500           ;
+	 len         number          := length(p_clob)  ;
+     LF          char            := chr(10)         ;      
+     nCRLF       number          := 1               ;
+   begin
+     while (offset < len AND nCRLF <> 0)
+     loop 
+       nCRLF := instr(substr(p_clob, offset, amount),LF, -1);
+       IF nCRLF = 0 THEN
+          dbms_output.put_line(substr(p_clob, offset));
+       Else
+         dbms_output.put_line(substr(p_clob, offset, nCRLF  ));
+       End If;
+        
+       offset := offset + nCRLF;
+     end loop;              
+   exception
+     when others then
+       dbms_output.put_line('Error : '||sqlerrm);
+   end printout; 
+   
+   PROCEDURE PRINT_REFCURSOR (CR IN OUT SYS_REFCURSOR)
+    IS
+       l_curid      NUMBER;
+       l_col_cnt    INTEGER;
+       rec_tab      DBMS_SQL.DESC_TAB;
+       l_text       VARCHAR2 (4000);
+       l_flag       NUMBER;
+       l_varchar2   VARCHAR2 (4000);
+       l_number     NUMBER;
+       l_date       DATE;
+
+   BEGIN
+       l_curid := DBMS_SQL.TO_CURSOR_NUMBER(CR);
+
+        -- define columns
+        DBMS_SQL.DESCRIBE_COLUMNS (l_curid, l_col_cnt, rec_tab);
+       FOR pos IN 1 .. l_col_cnt
+       LOOP
+          CASE rec_tab (pos).col_type
+             WHEN 1 THEN
+                DBMS_SQL.DEFINE_COLUMN (l_curid,pos,l_varchar2,2000);
+             WHEN 2 THEN
+                DBMS_SQL.DEFINE_COLUMN (l_curid, pos, l_number);
+             WHEN 12 THEN
+                DBMS_SQL.DEFINE_COLUMN (l_curid, pos, l_date);
+          END CASE;
+       END LOOP;
+
+       -- Print column names of dynamic sql
+       FOR pos IN 1 .. l_col_cnt
+       LOOP
+          l_text := LTRIM (l_text || ',' || LOWER (rec_tab (pos).col_name), ',');
+       END LOOP;
+
+       dbms_output.put_line (l_text);
+
+       -- Print data fetched by query
+       LOOP
+          l_flag := DBMS_SQL.FETCH_ROWS (l_curid);
+          EXIT WHEN l_flag = 0;
+          l_text := NULL;
+
+          FOR pos IN 1 .. l_col_cnt
+          LOOP
+             CASE rec_tab(pos).col_type
+                WHEN 1 THEN
+                   DBMS_SQL.COLUMN_VALUE (l_curid, pos, l_varchar2);
+                   l_text := l_text || l_varchar2 || ','  ;
+                WHEN 2 THEN
+                   DBMS_SQL.COLUMN_VALUE (l_curid, pos, l_number);
+                   l_text := l_text || to_char(l_number) || ',' ;
+                WHEN 12 THEN
+                   DBMS_SQL.COLUMN_VALUE (l_curid, pos, l_date);
+                   l_text := l_text || TO_CHAR (l_date, 'DD/MM/YYYY HH24:MI:SS') || ',' ;
+             END CASE;
+          END LOOP;
+          l_text := substr(l_text, 1, length(l_text) -1 );
+          dbms_Output.put_line (l_text);
+       END LOOP;
+       
+       DBMS_SQL.CLOSE_CURSOR (l_curid);
+   END;
+   function get_index(p_tbl IN t_colformat, p_val in varchar) return pls_integer
+    is
+     i pls_integer := 1;
+   begin
+     while ( i is not null )
+     loop
+       if p_tbl(i).col_name = p_val then
+          return i;
+       end if;
+       i := p_tbl.next(i);
+     end loop;
+     return -1; 
+   end;   
+   
+begin
+
+  for j in 1..pi_colformats.COUNT
+  loop
+     tbl_colformat.EXTEND();
+     tbl_colformat(tbl_colformat.LAST).col_name     := replace(regexp_substr(pi_colformats(j)||',', '(.*?),', 1, 1),',','');
+     tbl_colformat(tbl_colformat.LAST).col_datatype := replace(regexp_substr(pi_colformats(j)||',', '(.*?),', 1, 2),',','');
+     tbl_colformat(tbl_colformat.LAST).col_format   := replace(regexp_substr(pi_colformats(j)||',', '(.*?),', 1, 3),',','');
+  end loop;
+  
+  s_cteclause := rpad(' ', 5) || 'with '                                                   || chr(10) ||
+                 rpad(' ', 5) || 'cte as '                                                 || chr(10) ||
+                 rpad(' ', 5) || '('                                                       || chr(10) ||
+                 rpad(' ', 5) || '    select /*+ parallel (t, '|| nParallel ||') */'       || chr(10) ||
+                 rpad(' ', 5) || '           ' || to_char(pi_colname)                      || chr(10) ||
+                 rpad(' ', 5) || '    from   ' || pi_schname || '.' || pi_tabname || ' t ' || chr(10) ||
+                 rpad(' ', 5) || ')'  
+                 ;
+
+    open  cr_alltabcols;
+    fetch cr_alltabcols bulk collect into t_alltabcols ;
+    close cr_alltabcols;
+    
+    for j in 1..t_alltabcols.COUNT
+    loop
+    
+       s_index := get_index(tbl_colformat, t_alltabcols(j).column_name);
+       
+       if s_index <> -1 then
+         if tbl_colformat(s_index).col_datatype = 'DATE' then
+            t_alltabcols(j).is_date   := 1 ;
+            t_alltabcols(j).is_number := 0 ;
+            t_alltabcols(j).is_char   := 0 ;
+            t_alltabcols(j).dt_fmt    := tbl_colformat(s_index).col_format;
+         end if;
+       end if;
+ 
+       s_selclause  := rpad(' ',05) || 'select    /*+ parallel(c, '|| nParallel ||') */ ' || chr(10) ||
+                       rpad(' ',15) || to_char(j) || ' as rn '                            || chr(10) ;
+       s_frmclause  := rpad(' ',05) || 'from      cte c  '  ;
+       s_whrclause  := rpad(' ',05) || 'where     1 = 1  '  ;
+
+       s_selclause :=  s_selclause || rpad(' ',15) || ', ' || 'cast(' || chr(39) || t_alltabcols(j).column_name || chr(39) || ' as varchar2(35) )   as colname'  || chr(10) ||
+                                      rpad(' ',15) || ', ' || to_char(t_alltabcols(j).data_length)    || ' as datalength'                                        || chr(10) ||
+                                      rpad(' ',15) || ', ' || to_char(t_alltabcols(j).is_char)        || ' as is_char'                                           || chr(10) ||
+                                      rpad(' ',15) || ', ' || to_char(t_alltabcols(j).is_number)      || ' as is_number'                                         || chr(10) ||
+                                      rpad(' ',15) || ', ' || to_char(t_alltabcols(j).is_date)        || ' as is_date'                                           || chr(10) ||
+                                      rpad(' ',15) || ', ' || to_char(t_alltabcols(j).is_ts)          || ' as is_ts'                                             || chr(10) ||
+                                      rpad(' ',15) || ', ' || to_char(t_alltabcols(j).is_pk)          || ' as is_pk'                                             || chr(10) ||
+                                      rpad(' ',15) || ', ' || to_char(t_alltabcols(j).is_uk)          || ' as is_fk'                                             || chr(10) ||
+                                      rpad(' ',15) || ', ' || to_char(t_alltabcols(j).is_fk)          || ' as is_uk'                                             || chr(10) ||
+                                      rpad(' ',15) || ', ' || to_char(t_alltabcols(j).is_ck)          || ' as is_ck'                                             || chr(10) ||
+                                      rpad(' ',15) || ', ' || to_char(t_alltabcols(j).is_nullable)    || ' as is_nullable'                                       || chr(10) ||
+                                      rpad(' ',15) || ', ' || to_char(t_alltabcols(j).is_default)     || ' as is_default'                                        || chr(10) ||
+                                      rpad(' ',15) || ', ' || to_char(t_alltabcols(j).data_precision) || ' as data_precision'                                    || chr(10) ||
+                                      rpad(' ',15) || ', ' || to_char(t_alltabcols(j).data_scale)     || ' as data_scale'                                        || chr(10) ||
+                                      rpad(' ',15) || ', count(distinct '   || t_alltabcols(j).column_name ||') as  ndv'                                         || chr(10) ||
+                                      case when t_alltabcols(j).is_number = 1 then
+                                           rpad(' ',15) || ', min('     || t_alltabcols(j).column_name ||') as  mn'   || chr(10) ||
+                                           rpad(' ',15) || ', max('     || t_alltabcols(j).column_name ||') as  mx'   || chr(10) ||
+                                           rpad(' ',15) || ', avg('     || t_alltabcols(j).column_name ||') as  av'   || chr(10) ||
+                                           rpad(' ',15) || ', variance('|| t_alltabcols(j).column_name ||') as  va'   || chr(10) ||
+                                           rpad(' ',15) || ', stddev('  || t_alltabcols(j).column_name ||') as  sd'
+                                      end ||
+                                      case when t_alltabcols(j).is_char = 1 then
+                                           rpad(' ',15) || ', min(lengthb(nvl(trim('     || t_alltabcols(j).column_name ||'),0))) as  mn'   || chr(10) ||
+                                           rpad(' ',15) || ', max(lengthb(nvl(trim('     || t_alltabcols(j).column_name ||'),0))) as  mx'   || chr(10) ||
+                                           rpad(' ',15) || ', avg(lengthb(nvl(trim('     || t_alltabcols(j).column_name ||'),0))) as  av'   || chr(10) ||
+                                           rpad(' ',15) || ', variance(lengthb(nvl(trim('|| t_alltabcols(j).column_name ||'),0))) as  va'   || chr(10) ||
+                                           rpad(' ',15) || ', stddev(lengthb(nvl(trim('  || t_alltabcols(j).column_name ||'),0))) as  sd'
+                                      end ||
+                                      case 
+                                      when t_alltabcols(j).is_date = 1 and t_alltabcols(j).dt_fmt is not null and t_alltabcols(j).dt_fmt  = 'YYYYMM' then
+                                           rpad(' ',15) || ', min(      abs( months_between(sysdate, to_date( '|| t_alltabcols(j).column_name ||' , '|| chr(39) || t_alltabcols(j).dt_fmt  || chr(39)  ||' ) ) ) ) as  mn'   || chr(10) ||
+                                           rpad(' ',15) || ', max(      abs( months_between(sysdate, to_date( '|| t_alltabcols(j).column_name ||' , '|| chr(39) || t_alltabcols(j).dt_fmt  || chr(39)  ||' ) ) ) ) as  mx'   || chr(10) ||
+                                           rpad(' ',15) || ', avg(      abs( months_between(sysdate, to_date( '|| t_alltabcols(j).column_name ||' , '|| chr(39) || t_alltabcols(j).dt_fmt  || chr(39)  ||' ) ) ) ) as  av'   || chr(10) ||
+                                           rpad(' ',15) || ', variance( abs( months_between(sysdate, to_date( '|| t_alltabcols(j).column_name ||' , '|| chr(39) || t_alltabcols(j).dt_fmt  || chr(39)  ||' ) ) ) ) as  va'   || chr(10) ||
+                                           rpad(' ',15) || ', stddev(   abs( months_between(sysdate, to_date( '|| t_alltabcols(j).column_name ||' , '|| chr(39) || t_alltabcols(j).dt_fmt  || chr(39)  ||' ) ) ) ) as  sd'   
+                                      when t_alltabcols(j).is_date = 1 and t_alltabcols(j).dt_fmt is not null and t_alltabcols(j).dt_fmt <> 'YYYYMM' then
+                                           rpad(' ',15) || ', min(       round( sysdate -to_date('|| t_alltabcols(j).column_name ||','|| chr(39) || t_alltabcols(j).dt_fmt || chr(39) ||'))  ) as  mn'   || chr(10) ||
+                                           rpad(' ',15) || ', max(       round( sysdate -to_date('|| t_alltabcols(j).column_name ||','|| chr(39) || t_alltabcols(j).dt_fmt || chr(39) ||'))  ) as  mx'   || chr(10) ||
+                                           rpad(' ',15) || ', avg(       round( sysdate -to_date('|| t_alltabcols(j).column_name ||','|| chr(39) || t_alltabcols(j).dt_fmt || chr(39) ||'))  ) as  av'   || chr(10) ||
+                                           rpad(' ',15) || ', variance(  round( sysdate -to_date('|| t_alltabcols(j).column_name ||','|| chr(39) || t_alltabcols(j).dt_fmt || chr(39) ||'))  ) as  va'   || chr(10) ||
+                                           rpad(' ',15) || ', stddev(    round( sysdate -to_date('|| t_alltabcols(j).column_name ||','|| chr(39) || t_alltabcols(j).dt_fmt || chr(39) ||'))  ) as  sd'
+                                      when t_alltabcols(j).is_date = 1 and t_alltabcols(j).dt_fmt is null then
+                                           rpad(' ',15) || ', min(       (sysdate -'|| t_alltabcols(j).column_name || ') * 86400  ) as  mn'   || chr(10) ||
+                                           rpad(' ',15) || ', max(       (sysdate -'|| t_alltabcols(j).column_name || ') * 86400  ) as  mx'   || chr(10) ||
+                                           rpad(' ',15) || ', avg(       (sysdate -'|| t_alltabcols(j).column_name || ') * 86400  ) as  av'   || chr(10) ||
+                                           rpad(' ',15) || ', variance(  (sysdate -'|| t_alltabcols(j).column_name || ') * 86400  ) as  va'   || chr(10) ||
+                                           rpad(' ',15) || ', stddev(    (sysdate -'|| t_alltabcols(j).column_name || ') * 86400  ) as  sd'
+                                      when t_alltabcols(j).is_ts = 1 then
+                                           rpad(' ',15) || ', min(      extract(second from (systimestamp -'|| t_alltabcols(j).column_name ||')) + extract(minute from (systimestamp -' || t_alltabcols(j).column_name ||'))*60 + extract(hour from (systimestamp -' || t_alltabcols(j).column_name ||'))*60*60 + extract(day from (systimestamp -'  || t_alltabcols(j).column_name ||'))*60*60*24 ) as  mn'   || chr(10) ||
+                                           rpad(' ',15) || ', max(      extract(second from (systimestamp -'|| t_alltabcols(j).column_name ||')) + extract(minute from (systimestamp -' || t_alltabcols(j).column_name ||'))*60 + extract(hour from (systimestamp -' || t_alltabcols(j).column_name ||'))*60*60 + extract(day from (systimestamp -'  || t_alltabcols(j).column_name ||'))*60*60*24 ) as  mx'   || chr(10) ||
+                                           rpad(' ',15) || ', avg(      extract(second from (systimestamp -'|| t_alltabcols(j).column_name ||')) + extract(minute from (systimestamp -' || t_alltabcols(j).column_name ||'))*60 + extract(hour from (systimestamp -' || t_alltabcols(j).column_name ||'))*60*60 + extract(day from (systimestamp -'  || t_alltabcols(j).column_name ||'))*60*60*24 ) as  av'   || chr(10) ||
+                                           rpad(' ',15) || ', variance( extract(second from (systimestamp -'|| t_alltabcols(j).column_name ||')) + extract(minute from (systimestamp -' || t_alltabcols(j).column_name ||'))*60 + extract(hour from (systimestamp -' || t_alltabcols(j).column_name ||'))*60*60 + extract(day from (systimestamp -'  || t_alltabcols(j).column_name ||'))*60*60*24 ) as  va'   || chr(10) ||
+                                           rpad(' ',15) || ', stddev(   extract(second from (systimestamp -'|| t_alltabcols(j).column_name ||')) + extract(minute from (systimestamp -' || t_alltabcols(j).column_name ||'))*60 + extract(hour from (systimestamp -' || t_alltabcols(j).column_name ||'))*60*60 + extract(day from (systimestamp -'  || t_alltabcols(j).column_name ||'))*60*60*24 ) as  sd'
+                                      end                                                                                  
+       ;
+       if t_alltabcols(j).dt_fmt is not null then
+         s_whrclause := s_whrclause  || chr(10) ||
+                        rpad(' ',05) || '       and MDXODS_EXEC.XFR_LOGDQCHECKS.fn_isvaliddateformat('|| t_alltabcols(j).column_name ||','|| chr(39) || t_alltabcols(j).dt_fmt || chr(39) || ') = 1 ' 
+                        ;
+       end if; 
+       s_lcteclause := s_lcteclause || chr(10) || s_selclause                  || chr(10) ||
+                                                  s_frmclause                  || chr(10) ||
+                                                  s_whrclause                  || chr(10) ||
+                                       rpad(' ', 05) || 'union all ';
+                     
+    end loop;
+    s_lcteclause := substr(s_lcteclause, 1, length(s_lcteclause) -10 );
+    s_sql := s_cteclause || s_lcteclause;
+    printout(s_sql);
+    open  cr for s_sql ;
+    PRINT_REFCURSOR(cr);
+    if cr%isopen then
+      close cr;
+    end if;
+exception
+   when others then
+   dbms_output.put_line(dbms_utility.format_error_backtrace);
+end;
+/

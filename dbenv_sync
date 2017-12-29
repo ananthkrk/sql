@@ -1,0 +1,695 @@
+set serveroutput on size unlimited;
+set feedback off;
+declare
+
+  type rec is record
+  (
+    objownr  VARCHAR2(35),
+    objtype  VARCHAR2(35),
+    objname  VARCHAR2(35)
+  ) ;
+  
+  type privs is record
+  (
+    objownr  VARCHAR2(35),
+    objname  VARCHAR2(35),
+    grantee  VARCHAR2(35),
+    prvileg  VARCHAR2(4000),
+    grtoptn  VARCHAR2(05)
+  );
+  
+  cr   SYS_REFCURSOR;
+  
+  TYPE tb_ddl      IS TABLE     OF CLOB;
+  TYPE tb_rec      IS TABLE     OF REC;
+  TYPE tb_privs    IS TABLE     OF privs;
+  type tb_source   IS TABLE     OF VARCHAR2(4000);  
+  TYPE obj_array_t IS VARRAY(3) OF VARCHAR2(35);
+
+  t_ddl     tb_ddl      := tb_ddl();
+  l_ddl     tb_ddl      := tb_ddl();
+  t_rec     tb_rec      := tb_rec();
+  t_privs   tb_privs    := tb_privs();
+  
+  src_source  tb_source   := tb_source();
+  trg_source  tb_source   := tb_source();
+  
+  obj_array obj_array_t := obj_array_t('OBJECT_GRANT', 'INDEX', 'TRIGGER');
+  
+  l_sql    CLOB;
+  l_smt    CLOB;
+  l_tms    CLOB;
+  l_pcd    CLOB;
+  l_grt    CLOB;
+  l_rvk    CLOB;
+  v_DDL    CLOB;
+  
+  vSch     VARCHAR2(35) ;
+  vVrb     VARCHAR2(35) ;
+  vOTy     VARCHAR2(35) ;
+  vNam     VARCHAR2(35) ;
+  
+  l_sch      VARCHAR2(35) := 'MDXLOG_EXEC' ;
+  l_srcDB    VARCHAR2(35) := 'MDXUT1'      ;
+  l_trgDB    VARCHAR2(35) := 'MDXTT1'      ;
+  
+  
+    procedure printout(p_clob in clob) 
+    is
+      offset      number := 1;
+      amount      number := 31500;
+	  len         number := length(p_clob);
+      line_seq    NUMBER := 1;
+      LF          char := chr(10);      
+      nCRLF       number := 1 ;
+      lc_buffer   varchar2(32500);
+    begin
+      while (offset < len AND nCRLF <> 0)
+      loop 
+        nCRLF := instr(substr(p_clob, offset, amount),LF, -1);
+        IF nCRLF = 0 THEN
+          dbms_output.put_line(substr(p_clob, offset));
+        Else
+          dbms_output.put_line(substr(p_clob, offset, nCRLF  ));
+        End If;
+        
+        offset := offset + nCRLF;
+      end loop;              
+   exception
+     when others then
+        dbms_output.put_line('Error : '||sqlerrm);
+   end printout;
+
+  procedure cnv_ddl(piCLOB IN CLOB, piTbl in VARCHAR2, poDDL OUT tb_DDL)
+  is
+    altCount        number ;
+    s               number ;
+    e               number ;
+    oraPosition     NUMBER ;
+    
+    altSearch       VARCHAR2(65) := 'ALTER TABLE'|| ' '|| piTbl ;
+    oraSearch       VARCHAR2(05) := 'ORA-'        ;
+    supSearch       VARCHAR2(25) := 'SUPPLEMENTAL LOG';
+    extSearch       VARCHAR2(25) := 'ALLOCATE EXTENT';
+    pfrSearch       VARCHAR2(25) := 'PCTFREE';
+    pudSearch       VARCHAR2(25) := 'PCTUSED';
+    str             CLOB;
+    
+    flag            BOOLEAN      := TRUE;
+    p_DDL           tb_DDL       := tb_DDL();
+    
+    
+  begin
+    altCount :=  REGEXP_COUNT(piCLOB,altSearch ,1,'i');
+    for j in 1..altCount
+    loop
+      s   := instr (piCLOB,altSearch,1,j);
+      e   := instr (piCLOB,altSearch,1,j+1);
+      str := replace(substr(piCLOB,s, case when e > s then e - s - 1 else length(piCLOB) - e END),'"') || ';' ;
+      
+     
+      if REGEXP_COUNT(str,oraSearch,1,'i') > 0 then
+        oraPosition := INSTR(str, oraSearch,1 );
+        str := substr(str, 1, oraPosition);
+        if REGEXP_COUNT(str,oraSearch,1,'i') > 0 then
+          flag := FALSE; 
+        end if;
+      end if;
+      
+     
+      if REGEXP_COUNT(str,supSearch,1,'i') > 0 then 
+        flag := FALSE; 
+      End If;
+      
+      if REGEXP_COUNT(str,extSearch,1,'i') > 0 then 
+        flag := FALSE; 
+      End If;
+      
+      if REGEXP_COUNT(str,pudSearch,1,'i') > 0 then 
+        flag := FALSE; 
+      End If;
+      
+      if REGEXP_COUNT(str,pfrSearch,1,'i') > 0 then 
+        flag := FALSE; 
+      End If;
+      
+      if flag Then
+        p_DDL.EXTEND;
+        p_DDL(P_DDL.COUNT) := replace(str,chr(10)) || chr(10);
+      end if;
+    end loop;
+    poDDL   := p_DDL;
+
+  Exception
+    When Others Then 
+     dbms_output.put_line(sqlerrm);  
+  end;    
+  
+  procedure addStorage(pSchema IN VARCHAR2, pTable IN VARCHAR2, pCLOB IN CLOB, pSTRG OUT CLOB)
+  is
+    v_tablespace   VARCHAR2(35);
+    v_compression  VARCHAR2(35);
+    v_compress_for VARCHAR2(35);
+    v_STRG         VARCHAR2(1500);
+     
+    lc_buffer_bef  CLOB;
+    lc_buffer_aft  CLOB;
+     
+    lc_idx         NUMBER;
+  
+  begin
+    SELECT tablespace_name,   compression,    compress_for 
+    INTO   v_tablespace,    v_compression,  v_compress_for
+    from   dba_tables
+    where  owner      = pSchema
+    and    table_name = pTable;
+     
+    if v_tablespace is NOT NULL then
+      v_STRG :=  chr(10) || ' TABLESPACE ' || v_tablespace ;
+    end if;
+     
+    if v_compression = 'ENABLED' and v_compress_for is NULL  then
+      v_STRG := v_STRG || chr(10) ||  ' COMPRESS ' ;
+    elsif v_compression = 'ENABLED' and v_compress_for  = 'BASIC' then
+       v_STRG := v_STRG || chr(10) ||  ' COMPRESS BASIC '  ;
+    elsif  v_compression = 'ENABLED' and v_compress_for <> 'BASIC' then
+      v_STRG := v_STRG || chr(10) ||  ' COMPRESS  FOR ' || v_compress_for ;             
+    end if;
+     
+    lc_idx := instr (pCLOB,';',-1);
+    pSTRG  := substr(pCLOB,1, lc_idx - 1) || v_STRG || substr(pCLOB, lc_idx) || chr(10); 
+  end;
+  
+  procedure gen_ddl(pOwner IN VARCHAR2, pObjType IN VARCHAR2, pObjName IN VARCHAR2, pCLOB OUT tb_DDL)
+  is
+    
+    b_delexst         BOOLEAN;
+    v_delname         VARCHAR2(35);
+    
+    t_clb             tb_DDL := tb_DDL();
+    
+    tableOpenHandle   NUMBER;
+    depObjOpenHandle  NUMBER;
+    tableTransHandle  NUMBER;
+    indexTransHandle  NUMBER;  
+    
+    tableDDLs         sys.ku$_ddls;
+    tableDDL          sys.ku$_ddl;
+
+    dpndtDDLs         sys.ku$_ddls;
+    dpndtDDL          sys.ku$_ddl;
+    parsedItems       sys.ku$_parsed_items;      
+  BEGIN
+    BEGIN
+    SELECT D.REFERENCED_NAME INTO v_delname
+    FROM   DBA_TRIGGERS T, DBA_DEPENDENCIES D
+    WHERE  D.NAME            = T.TRIGGER_NAME
+    AND    D.OWNER           = T.OWNER
+    AND    D.REFERENCED_TYPE = 'TABLE'
+    AND    T.OWNER           = pOwner
+    AND    T.TABLE_NAME      = pObjName
+    AND    D.REFERENCED_NAME <> T.TABLE_NAME;
+
+    if v_delname is not null then
+      b_delexst := TRUE;
+    end if;
+    EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+       b_delexst := FALSE;
+    END;
+
+  tableOpenHandle := DBMS_METADATA.OPEN(pObjType);
+  
+  if b_delexst  then
+    dbms_metadata.set_filter(tableOpenHandle, 'SCHEMA_EXPR', 'IN (' || chr(39)|| pOwner || chr(39) ||')'           );
+    dbms_metadata.set_filter(tableOpenHandle, 'NAME_EXPR'  , 'IN (' || chr(39)|| pObjName || chr(39) ||',' || chr(39)|| v_delname || chr(39)|| ' )'           );
+  else
+    dbms_metadata.set_filter(tableOpenHandle, 'SCHEMA_EXPR', 'IN (' || chr(39)|| pOwner || chr(39) ||')'           );
+    dbms_metadata.set_filter(tableOpenHandle, 'NAME_EXPR'  , 'IN (' || chr(39)|| pObjName || chr(39) ||')'           );
+  end if;
+
+  dbms_metadata.set_parse_item(tableOpenHandle, 'SCHEMA');
+  dbms_metadata.set_parse_item(tableOpenHandle, 'NAME');
+  dbms_metadata.set_parse_item(tableOpenHandle, 'OBJECT_TYPE');
+  dbms_metadata.set_parse_item(tableOpenHandle, 'VERB');
+
+  tableTransHandle := dbms_metadata.add_transform(tableOpenHandle, 'DDL');
+
+  dbms_metadata.set_transform_param(tableTransHandle, 'SQLTERMINATOR'        , TRUE );
+  dbms_metadata.set_transform_param(tableTransHandle, 'PRETTY'               , TRUE );
+
+  if pObjType in ('TABLE') then
+     dbms_metadata.set_transform_param(tableTransHandle, 'CONSTRAINTS_AS_ALTER' , TRUE );
+     dbms_metadata.set_transform_param(tableTransHandle, 'STORAGE'               ,FALSE);
+     dbms_metadata.set_transform_param(tableTransHandle, 'SEGMENT_ATTRIBUTES'    ,FALSE);
+  end if;
+
+  LOOP
+    tableDDLs := dbms_metadata.fetch_ddl(tableOpenHandle);
+    EXIT WHEN tableDDLs IS NULL;
+
+    for j in tableDDLs.first..tableDDLs.LAST
+    loop
+       tableDDL    := tableDDLs(j);
+       parsedItems := tableDDL.parsedItems;
+
+       vSch := NULL;
+       vNam := NULL;
+       vVrb := NULL;
+       vOTy := NULL;
+       
+       for m in 1..parsedItems.COUNT
+       loop
+
+          if parsedItems(m).item = 'SCHEMA' then
+            vSch := parsedItems(m).value;
+          elsif parsedItems(m).item = 'NAME' then
+            vNam := parsedItems(m).value;
+          elsif parsedItems(m).item = 'VERB' then
+            vVrb := parsedItems(m).value;
+          elsif parsedItems(m).item = 'OBJECT_TYPE' then
+            vOTy := parsedItems(m).value;
+          end if;
+          
+       end loop;
+       
+       if instr(tableDDLs(j).ddltext,'CONSTRAINT') > 0 then
+         vOTy := 'CONSTRAINT';
+       end if;
+       
+       t_clb.EXTEND;
+       if vVrb = 'CREATE' and vOTy = 'TABLE' THEN
+         addStorage( vSch, vNam, replace(tableDDLs(j).ddltext,'"'), t_clb(t_clb.count) );  
+       else
+         t_clb(t_clb.count) := replace(tableDDLs(j).ddltext,'"') || CHR(10);
+       end if;
+
+    end loop;
+    
+  END LOOP;
+
+  FOR i IN obj_array.first..obj_array.last
+  LOOP
+    depObjOpenHandle := dbms_metadata.open(obj_array(i));
+
+    dbms_metadata.set_filter(depObjOpenHandle    , 'BASE_OBJECT_SCHEMA'  ,pOwner   );
+    dbms_metadata.set_filter(depObjOpenHandle    , 'BASE_OBJECT_NAME'    ,pObjName );
+    dbms_metadata.set_parse_item(depObjOpenHandle, 'BASE_OBJECT_SCHEMA'            );
+    dbms_metadata.set_parse_item(depObjOpenHandle, 'BASE_OBJECT_NAME'              );
+    dbms_metadata.set_parse_item(depObjOpenHandle, 'BASE_OBJECT_TYPE'              );
+    dbms_metadata.set_parse_item(depObjOpenHandle, 'SCHEMA'                        );    
+    dbms_metadata.set_parse_item(depObjOpenHandle, 'VERB'                          );
+    dbms_metadata.set_parse_item(depObjOpenHandle, 'NAME'                          );
+    dbms_metadata.set_parse_item(depObjOpenHandle, 'OBJECT_TYPE'                   );
+
+
+    if obj_array(i) = 'INDEX' then
+      DBMS_METADATA.SET_FILTER(depObjOpenHandle,'SYSTEM_GENERATED',false);
+    end if;
+
+    indexTransHandle := dbms_metadata.add_transform(depObjOpenHandle, 'DDL');
+
+    dbms_metadata.set_transform_param(indexTransHandle, 'SQLTERMINATOR', TRUE );
+    dbms_metadata.set_transform_param(indexTransHandle, 'PRETTY'       , TRUE );
+    if obj_array(i) = 'INDEX' then
+       dbms_metadata.set_transform_param(indexTransHandle, 'STORAGE'           , FALSE);
+       dbms_metadata.set_transform_param(indexTransHandle, 'SEGMENT_ATTRIBUTES', FALSE);
+    end if;
+    LOOP
+      dpndtDDLs := dbms_metadata.fetch_ddl(depObjOpenHandle);
+      EXIT WHEN dpndtDDLs IS NULL;
+      
+      for j in dpndtDDLs.first..dpndtDDLs.LAST
+      LOOP
+        dpndtDDL    := dpndtDDLs(j);
+        parsedItems := dpndtDDL.parsedItems;
+        
+        vSch := NULL;
+        vNam := NULL;
+        vVrb := NULL;
+        vOTy := NULL;
+        
+        for m in 1..parsedItems.COUNT
+        loop
+        
+          if parsedItems(m).item = 'SCHEMA' then
+            vSch := parsedItems(m).value;
+          elsif parsedItems(m).item = 'NAME' then
+            vNam := parsedItems(m).value;
+          elsif parsedItems(m).item = 'VERB' then
+            vVrb := parsedItems(m).value;
+          elsif parsedItems(m).item = 'OBJECT_TYPE' then
+            vOTy := parsedItems(m).value;
+          end if;
+          
+        end loop;
+        
+        if instr(dpndtDDLs(j).ddltext,'CONSTRAINT') > 0 then
+          vOTy := 'CONSTRAINT';
+        end if;
+          
+        t_clb.EXTEND;
+        t_clb(t_clb.count) := replace(dpndtDDLs(j).ddltext,'"') || CHR(10);
+        
+      END LOOP;
+    END LOOP;
+
+    dbms_metadata.close(depObjOpenHandle);
+
+  END LOOP;
+
+  if b_delexst then
+    FOR i IN obj_array.first..obj_array.last
+    LOOP
+      depObjOpenHandle := dbms_metadata.open(obj_array(i));
+
+      dbms_metadata.set_filter(depObjOpenHandle    , 'BASE_OBJECT_SCHEMA'  ,pOwner   );
+      dbms_metadata.set_filter(depObjOpenHandle    , 'BASE_OBJECT_NAME'    ,v_delname);
+      dbms_metadata.set_parse_item(depObjOpenHandle, 'BASE_OBJECT_SCHEMA'            );
+      dbms_metadata.set_parse_item(depObjOpenHandle, 'BASE_OBJECT_NAME'              );
+      dbms_metadata.set_parse_item(depObjOpenHandle, 'BASE_OBJECT_TYPE'              );
+      dbms_metadata.set_parse_item(depObjOpenHandle, 'VERB'                          );
+      dbms_metadata.set_parse_item(depObjOpenHandle, 'SCHEMA'                        );    
+      dbms_metadata.set_parse_item(depObjOpenHandle, 'NAME'                          );
+      dbms_metadata.set_parse_item(depObjOpenHandle, 'OBJECT_TYPE'                   );
+      
+      if obj_arrAy(i) = 'INDEX' then
+        DBMS_METADATA.SET_FILTER(depObjOpenHandle,'SYSTEM_GENERATED',false);
+      end if;
+
+      indexTransHandle := dbms_metadata.add_transform(depObjOpenHandle, 'DDL');
+
+      dbms_metadata.set_transform_param(indexTransHandle,  'SQLTERMINATOR', TRUE );
+      dbms_metadata.set_transform_param(indexTransHandle,  'PRETTY'       , TRUE );
+      if obj_array(i) = 'INDEX' then
+        dbms_metadata.set_transform_param(indexTransHandle,  'STORAGE'           , FALSE);
+        dbms_metadata.set_transform_param(indexTransHandle,  'SEGMENT_ATTRIBUTES', FALSE);
+      end if;
+      LOOP
+        dpndtDDLs := dbms_metadata.fetch_ddl(depObjOpenHandle);
+        EXIT WHEN dpndtDDLs IS NULL;
+        for j in dpndtDDLs.first..dpndtDDLs.LAST
+        LOOP
+          dpndtDDL    := dpndtDDLs(j);
+          parsedItems := dpndtDDL.parsedItems;
+          
+          vSch := NULL;
+          vNam := NULL;
+          vVrb := NULL;
+          vOTy := NULL;
+          
+          for m in 1..parsedItems.COUNT
+          loop
+            
+            if parsedItems(m).item = 'SCHEMA' then
+              vSch := parsedItems(m).value;
+            elsif parsedItems(m).item = 'NAME' then
+              vNam := parsedItems(m).value;
+            elsif parsedItems(m).item = 'VERB' then
+              vVrb := parsedItems(m).value;
+            elsif parsedItems(m).item = 'OBJECT_TYPE' then
+              vOTy := parsedItems(m).value;
+            end if;
+            
+          end loop;
+          
+          if instr(dpndtDDLs(j).ddltext,'CONSTRAINT') > 0 then
+            vOTy := 'CONSTRAINT';
+          end if;
+            
+          t_clb.EXTEND;
+          t_clb(t_clb.count) := replace(dpndtDDLs(j).ddltext,'"') || CHR(10);
+            
+        END LOOP;
+      END LOOP;
+      dbms_metadata.close(depObjOpenHandle);
+    END LOOP;   
+  end if; 
+  
+  pCLOB := t_clb;
+  end; 
+   
+begin
+  dbms_output.enable(buffer_size => NULL);
+  --dbms_output.put_line('--DDL Count So Far.. '||LPAD(t_ddl.COUNT,10) );
+  
+  l_smt := q'[ select o.owner, o.object_type, o.object_name 
+               from   dba_objects@]' || l_srcDB || q'[ o 
+               where  1 = 1
+               and    o.owner LIKE ']'|| l_sch || q'[%' 
+               and    o.object_type in ('TABLE','SEQUENCE','VIEW','PACKAGE','FUNCTION','PROCEDURE','TYPE')
+               and    not exists (
+                                  select 1 from dba_recyclebin@]' || l_srcDB || q'[ r 
+                                  where  r.original_name = o.object_name 
+                                  and    R.TYPE = o.object_type
+                                  and    r.owner = o.owner
+                                  and    r.base_object = o.object_id
+                                  )
+               -----
+               minus
+               -----    
+               select o.owner, o.object_type, o.object_name 
+               from   dba_objects@]'|| l_trgDB || q'[ o 
+               where  1 = 1
+               and    o.object_type in ('TABLE','SEQUENCE','VIEW','PACKAGE','FUNCTION','PROCEDURE','TYPE')
+               and    o.owner LIKE ']'|| l_sch || q'[%'
+               and    not exists (
+                                  select 1 from dba_recyclebin@]'|| l_trgDB || q'[ r 
+                                  where  r.original_name = o.object_name 
+                                  and    R.TYPE = o.object_type
+                                  and    r.owner = o.owner
+                                  and    r.base_object = o.object_id
+                                  )
+           ]';
+  --dbms_output.put_line(l_smt);
+  l_tms := q'[ select o.owner, o.object_type, o.object_name 
+               from   dba_objects@]' || l_trgDB || q'[ o 
+               where  1 = 1
+               and    o.owner LIKE ']'|| l_sch || q'[%'
+               and    o.object_type in ('TABLE','SEQUENCE','VIEW','PACKAGE','FUNCTION','PROCEDURE','TYPE')
+               and    not exists (
+                                  select 1 from dba_recyclebin@]' || l_trgDB || q'[ r 
+                                  where  r.original_name = o.object_name 
+                                  and    R.TYPE = o.object_type
+                                  and    r.owner = o.owner
+                                  and    r.base_object = o.object_id
+                                  )
+               -----
+               minus
+               -----   
+               select o.owner, o.object_type, o.object_name 
+               from   dba_objects@]'|| l_srcDB || q'[ o 
+               where  1 = 1
+               and    o.owner LIKE ']'|| l_sch || q'[%'
+               and    o.object_type in ('TABLE','SEQUENCE','VIEW','PACKAGE','FUNCTION','PROCEDURE','TYPE')
+               and    not exists (
+                                  select 1 from dba_recyclebin@]'|| l_srcDB || q'[ r 
+                                  where  r.original_name = o.object_name 
+                                  and    R.TYPE = o.object_type
+                                  and    r.owner = o.owner
+                                  and    r.base_object = o.object_id
+                                  )
+           ]';
+  --dbms_output.put_line(l_tms);
+  l_sql := q'[ select o.owner, o.object_type, o.object_name 
+               from   dba_objects@]' || l_trgDB || q'[ o 
+               where  1 = 1
+               and    o.owner LIKE ']'|| l_sch || q'[%'
+               and    o.object_type in ('TABLE', 'VIEW', 'INDEX','TYPE')
+               and    not exists (
+                                  select 1 from dba_recyclebin@]' || l_trgDB || q'[ r 
+                                  where  r.original_name = o.object_name 
+                                  and    R.TYPE = o.object_type
+                                  and    r.owner = o.owner
+                                  and    r.base_object = o.object_id
+                                  )
+               -----
+               intersect
+               -----   
+               select o.owner, o.object_type, o.object_name 
+               from   dba_objects@]'|| l_srcDB || q'[ o 
+               where  1 = 1
+               and    o.owner LIKE ']'|| l_sch || q'[%'
+               and    o.object_type in ('TABLE', 'VIEW', 'INDEX','TYPE')
+               and    not exists (
+                                  select 1 from dba_recyclebin@]'|| l_srcDB || q'[ r 
+                                  where  r.original_name = o.object_name 
+                                  and    R.TYPE = o.object_type
+                                  and    r.owner = o.owner
+                                  and    r.base_object = o.object_id
+                                  )
+           ]';
+  --dbms_output.put_line(l_sql);         
+  l_pcd := q'[ select o.owner, o.object_type, o.object_name
+               from   dba_objects@]'|| l_srcDB || q'[ o 
+               where  1=1
+               and    o.owner LIKE ']'|| l_sch || q'[%'
+               and    o.object_type in ('PACKAGE', 'PROCEDURE', 'FUNCTION')
+           ]';
+  --dbms_output.put_line(l_pcd);
+  
+  l_grt := q'[ select o.owner, o.table_name, o.grantee,
+                      listagg(privilege, ',') within group (order by 1) privs,
+                      o.grantable
+               from   dba_tab_privs@]' || l_srcDB || q'[ o 
+               where  1 = 1
+               and    o.owner LIKE ']'|| l_sch || q'[%' 
+               group by o.owner, o.table_name, o.grantee, o.grantable
+               -----
+               minus
+               -----    
+               select o.owner, o.table_name, o.grantee, 
+                      listagg(privilege, ',') within group (order by 1) privs,
+                      o.grantable
+               from   dba_tab_privs@]'|| l_trgDB || q'[ o 
+               where  1 = 1
+               and    o.owner LIKE ']'|| l_sch || q'[%'
+               group by o.owner, o.table_name, o.grantee, o.grantable
+           ]';
+           
+  l_rvk := q'[ select o.owner, o.table_name, o.grantee,
+                      listagg(privilege, ',') within group (order by 1) privs,
+                      o.grantable
+               from   dba_tab_privs@]' || l_trgDB || q'[ o 
+               where  1 = 1
+               and    o.owner LIKE ']'|| l_sch || q'[%' 
+               group by o.owner, o.table_name, o.grantee, o.grantable
+               -----
+               minus
+               -----    
+               select o.owner, o.table_name, o.grantee, 
+                      listagg(privilege, ',') within group (order by 1) privs,
+                      o.grantable
+               from   dba_tab_privs@]'|| l_srcDB || q'[ o 
+               where  1 = 1
+               and    o.owner LIKE ']'|| l_sch || q'[%'
+               group by o.owner, o.table_name, o.grantee, o.grantable
+           ]';
+           
+  -- REVOKE UN NECESSARY GRANTS IN TARGET ---
+  open  cr for l_rvk;
+  fetch cr bulk collect into t_privs;
+  close cr;   
+  
+  for j in 1..t_privs.COUNT
+  loop
+    --dbms_output.put_line('--REVOKE DDL FOR .. '||t_privs(j).prvileg  || ' -> ' || t_privs(j).objownr || '.' || t_privs(j).objname );
+    t_ddl.EXTEND();
+    t_ddl(t_DDL.COUNT) := 'REVOKE '|| t_privs(j).prvileg  || ' ON ' || t_privs(j).objownr||'.'||t_privs(j).objname || ' FROM ' || t_privs(j).grantee || ' ;'; 
+  end loop;   
+  
+  --dbms_output.put_line('--DDL Count So Far.. '||LPAD(t_ddl.COUNT,10) );
+  
+  
+  -- OBJECTS MISSING IN TARGET, BUT PRESENT IN SOURCE 
+  open  cr for l_smt;
+  fetch cr bulk collect into t_rec;
+  close cr;
+  
+ 
+  for j in 1..t_rec.COUNT
+  loop
+    --dbms_output.put_line('--GENERATING DDL FOR .. '||t_rec(j).objtype || ' -> ' || t_rec(j).objownr || '.' || t_rec(j).objname );
+    gen_ddl(t_rec(j).objownr, t_rec(j).objtype, t_rec(j).objname, l_ddl);
+    t_ddl :=  t_ddl MULTISET UNION l_ddl;
+  end loop;
+  
+  --dbms_output.put_line('--DDL Count So Far.. '||LPAD(t_ddl.COUNT,10) );
+  
+  open  cr for l_tms;
+  fetch cr bulk collect into t_rec;
+  close cr;
+  
+  for j in 1..t_rec.COUNT
+  loop
+    t_ddl.EXTEND();
+    if t_rec(j).objtype = 'TABLE' THEN
+      t_ddl(t_DDL.COUNT) := 'DROP '   || ' ' || t_rec(j).objtype || ' ' ||  t_rec(j).objownr||'.'||t_rec(j).objname || ' CASCADE CONSTRAINTS PURGE ; ' || chr(10);
+    else
+      t_ddl(t_DDL.COUNT) := 'DROP '   || ' ' || t_rec(j).objtype || ' ' ||  t_rec(j).objownr||'.'||t_rec(j).objname || ';' || chr(10);
+    end if;
+  end loop;
+  
+  --dbms_output.put_line('--DDL Count So Far.. '||LPAD(t_ddl.COUNT,10) );
+  
+  open  cr for l_sql;
+  fetch cr bulk collect into t_rec;
+  close cr;  
+  
+  for j in 1..t_rec.COUNT
+  loop
+    v_DDL := NULL;
+    l_DDL.DELETE;
+    --dbms_output.put_line('--GENERATING DIFF FOR .. '||t_rec(j).objtype || ' -> ' || t_rec(j).objownr || '.' || t_rec(j).objname );
+    v_DDL := dbms_metadata_diff.compare_alter 
+                                              ( t_rec(j).objType,
+                                                t_rec(j).objname,
+                                                t_rec(j).objname,
+                                                t_rec(j).objownr,
+                                                t_rec(j).objownr,
+                                                l_trgDB,
+                                                l_srcDB
+                                               );
+    cnv_ddl(v_DDL||chr(10), t_rec(j).objname, l_ddl);
+    t_ddl :=  t_ddl MULTISET UNION l_ddl;
+  end loop;
+  
+  --dbms_output.put_line('--DDL Count So Far.. '||LPAD(t_ddl.COUNT,10) );
+  
+  open  cr for l_pcd;
+  fetch cr bulk collect into t_rec;
+  close cr; 
+  
+  for j in 1..t_rec.COUNT
+  loop
+      execute immediate ' select text ' || 
+                        ' from dba_source@'|| l_srcDB || 
+                        ' where owner =   '|| chr(39) || t_rec(j).objownr || chr(39) ||
+                        ' and   name  =   '|| chr(39) || t_rec(j).objname || chr(39) ||
+                        ' and   type like '|| chr(39) || t_rec(j).objtype || chr(39) ||' order by type, line '
+         bulk collect into src_source;
+         
+      execute immediate ' select text '||
+                        ' from dba_source@'|| l_trgDB || 
+                        ' where owner =   '|| chr(39) || t_rec(j).objownr || chr(39) ||
+                        ' and   name  =   '|| chr(39) || t_rec(j).objname || chr(39) ||
+                        ' and   type like '|| chr(39) || t_rec(j).objtype || chr(39) ||' order by type, line '
+         bulk collect into trg_source;
+      
+      if src_source != trg_source then
+         gen_ddl(t_rec(j).objownr, t_rec(j).objtype, t_rec(j).objname, l_ddl);
+         t_ddl :=  t_ddl MULTISET UNION l_ddl;
+      end if; 
+      
+      --dbms_output.put_line('--DDL Count So Far.. '||LPAD(t_ddl.COUNT,10) );
+                                          
+  end loop;  
+  
+  open  cr for l_grt;
+  fetch cr bulk collect into t_privs;
+  close cr;   
+  
+  for j in 1..t_privs.COUNT
+  loop
+    t_ddl.EXTEND();
+    t_ddl(t_DDL.COUNT) := 'GRANT '|| t_privs(j).prvileg  || ' ON ' || t_privs(j).objownr||'.'||t_privs(j).objname || ' TO ' || t_privs(j).grantee || 
+                           case when t_privs(j).grtoptn = 'YES' then ' WITH GRANT OPTION ' end ||
+                           ' ;';
+  end loop;
+  
+  --dbms_output.put_line('--DDL Count So Far.. '||LPAD(t_ddl.COUNT,10) );
+  
+  for n in 1..t_ddl.COUNT
+  loop
+    printout(t_ddl(n));
+  end loop;
+  
+  --dbms_output.put_line('--DDL Count So Far.. '||LPAD(t_ddl.COUNT,10) );
+  
+  COMMIT;
+exception
+  when others then 
+  dbms_output.put_line(SQLERRM);
+  dbms_output.put_line(DBMS_UTILITY.FORMAT_ERROR_BACKTRACE);
+end;
+/

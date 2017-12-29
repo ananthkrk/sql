@@ -1,0 +1,183 @@
+SELECT * FROM DBA_HIST_SNAPSHOT ORDER BY BEGIN_INTERVAL_TIME DESC;
+
+
+
+SELECT OUTPUT FROM TABLE(DBMS_WORKLOAD_REPOSITORY.AWR_REPORT_HTML             (l_dbid => 2799302187,  l_inst_num => 1,           l_bid => 19815, l_eid => 19825 ));
+SELECT OUTPUT FROM TABLE(DBMS_WORKLOAD_REPOSITORY.AWR_SQL_REPORT_HTML         (l_dbid => 408857094,   l_inst_num => 3,           l_bid => 90800, l_eid => 91890 , l_sqlid=> '6xz141qaydj53'));
+SELECT OUTPUT FROM TABLE(DBMS_WORKLOAD_REPOSITORY.AWR_GLOBAL_REPORT_HTML      (l_dbid => 2799302187,  l_inst_num => '1,2,3,4',   l_bid => 6006, l_eid => 6007 ));
+SELECT OUTPUT FROM TABLE(DBMS_WORKLOAD_REPOSITORY.AWR_GLOBAL_DIFF_REPORT_HTML (  dbid1=> 2799302187,  inst_num1  => '1,2,3,4',   bid1=> 2655,   eid1 => 2656 , 
+                                                                                 dbid2=> 2799302187,  inst_num2  => '1,2,3,4',   bid2=> 2662,   eid2 => 2663));
+
+SELECT * FROM DBA_HIST_BASELINE
+EXEC DBMS_WORKLOAD_REPOSITORY.CREATE_BASELINE(2683,2684,'PERFTESTING_0605');
+
+SELECT * FROM TABLE(DBMS_WORKLOAD_REPOSITORY.SELECT_BASELINE_DETAILS(1));
+SELECT * FROM TABLE(DBMS_WORKLOAD_REPOSITORY.SELECT_BASELINE_DETAILS(2));
+
+SELECT METRIC_NAME, METRIC_UNIT, AVERAGE, MINIMUM, MAXIMUM 
+FROM   TABLE(DBMS_WORKLOAD_REPOSITORY.SELECT_BASELINE_METRIC('EQT PERF TESTING'))
+ORDER BY METRIC_NAME;
+
+
+SELECT EXTRACT( DAY FROM SNAP_INTERVAL) *24*60+
+       EXTRACT( HOUR FROM SNAP_INTERVAL) *60+
+       EXTRACT( MINUTE FROM SNAP_INTERVAL ) "Snapshot Interval",
+       EXTRACT( DAY FROM RETENTION) *24*60+
+       EXTRACT( HOUR FROM RETENTION) *60+
+       EXTRACT( MINUTE FROM RETENTION ) "Retention Interval"
+FROM   DBA_HIST_WR_CONTROL;
+
+--GENERATE AWR FOR RAC
+----------------------
+WITH TS AS
+(
+  SELECT TO_DATE('20/06/2016 09:44:00','DD/MM/YYYY HH24:MI:SS') ST_TM, 
+         TO_DATE('20/06/2016 19:01:00','DD/MM/YYYY HH24:MI:SS') EN_TM
+  FROM   DUAL
+),
+SNAPS AS 
+(
+  SELECT S.DBID, MIN(S.SNAP_ID) MNS, MAX(S.SNAP_ID) MXS
+  FROM   DBA_HIST_SNAPSHOT S, TS
+  WHERE  S.BEGIN_INTERVAL_TIME >= TS.ST_TM
+  AND    S.END_INTERVAL_TIME   <= TS.EN_TM
+  GROUP BY S.DBID
+)
+SELECT T.OUTPUT 
+FROM   SNAPS N, TABLE(DBMS_WORKLOAD_REPOSITORY.AWR_GLOBAL_REPORT_HTML 
+              (
+                l_dbid     => N.DBID,  
+                l_inst_num => '1,2,3,4', 
+                l_bid      => N.MNS, 
+                l_eid      => N.MXS 
+              )
+            ) T
+WHERE N.MNS < N.MXS
+;
+
+--GENERATE AWR FOR NODE 1
+-------------------------
+WITH TS AS
+(
+  SELECT TO_DATE('20/06/2016 09:44:00','DD/MM/YYYY HH24:MI:SS') ST_TM, 
+         TO_DATE('20/06/2016 19:01:00','DD/MM/YYYY HH24:MI:SS') EN_TM
+  FROM   DUAL
+),
+SNAPS AS 
+(
+  SELECT S.DBID, MIN(S.SNAP_ID) MNS, MAX(S.SNAP_ID) MXS
+  FROM   DBA_HIST_SNAPSHOT S, TS
+  WHERE  S.BEGIN_INTERVAL_TIME >= TS.ST_TM
+  AND    S.END_INTERVAL_TIME   <= TS.EN_TM
+  GROUP BY S.DBID
+)
+SELECT T.OUTPUT 
+FROM   SNAPS N, TABLE(DBMS_WORKLOAD_REPOSITORY.AWR_REPORT_HTML 
+              (
+                l_dbid     => N.DBID,  
+                l_inst_num => '1', 
+                l_bid      => N.MNS, 
+                l_eid      => N.MXS 
+              )
+            ) T
+WHERE N.MNS < N.MXS
+;
+--GENERATE AWR FOR NODE 2
+-------------------------
+WITH TS AS
+(
+  SELECT TO_DATE('20/06/2016 09:44:00','DD/MM/YYYY HH24:MI:SS') ST_TM, 
+         TO_DATE('20/06/2016 19:01:00','DD/MM/YYYY HH24:MI:SS') EN_TM
+  FROM   DUAL
+),
+SNAPS AS 
+(
+  SELECT S.DBID, MIN(S.SNAP_ID) MNS, MAX(S.SNAP_ID) MXS
+  FROM   DBA_HIST_SNAPSHOT S, TS
+  WHERE  S.BEGIN_INTERVAL_TIME >= TS.ST_TM
+  AND    S.END_INTERVAL_TIME   <= TS.EN_TM
+  GROUP BY S.DBID
+)
+SELECT T.OUTPUT 
+FROM   SNAPS N, TABLE(DBMS_WORKLOAD_REPOSITORY.AWR_REPORT_HTML 
+              (
+                l_dbid     => N.DBID,  
+                l_inst_num => '2', 
+                l_bid      => N.MNS, 
+                l_eid      => N.MXS 
+              )
+            ) T
+WHERE N.MNS < N.MXS
+;
+
+--GENERATE AWR FOR NODE 3
+-------------------------
+WITH TS AS
+(
+  SELECT TO_DATE('20/06/2016 09:44:00','DD/MM/YYYY HH24:MI:SS') ST_TM, 
+         TO_DATE('20/06/2016 19:01:00','DD/MM/YYYY HH24:MI:SS') EN_TM
+  FROM   DUAL
+),
+SNAPS AS 
+(
+  SELECT S.DBID, MIN(S.SNAP_ID) MNS, MAX(S.SNAP_ID) MXS
+  FROM   DBA_HIST_SNAPSHOT S, TS
+  WHERE  S.BEGIN_INTERVAL_TIME >= TS.ST_TM
+  AND    S.END_INTERVAL_TIME   <= TS.EN_TM
+  GROUP BY S.DBID
+)
+SELECT T.OUTPUT 
+FROM   SNAPS N, TABLE(DBMS_WORKLOAD_REPOSITORY.AWR_REPORT_HTML 
+              (
+                l_dbid     => N.DBID,  
+                l_inst_num => '3', 
+                l_bid      => N.MNS, 
+                l_eid      => N.MXS 
+              )
+            ) T
+WHERE N.MNS < N.MXS
+;
+
+--GENERATE AWR FOR NODE 4
+-------------------------
+WITH TS AS
+(
+  SELECT TO_DATE('20/06/2016 09:44:00','DD/MM/YYYY HH24:MI:SS') ST_TM, 
+         TO_DATE('20/06/2016 19:01:00','DD/MM/YYYY HH24:MI:SS') EN_TM
+  FROM   DUAL
+),
+SNAPS AS 
+(
+  SELECT S.DBID, MIN(S.SNAP_ID) MNS, MAX(S.SNAP_ID) MXS
+  FROM   DBA_HIST_SNAPSHOT S, TS
+  WHERE  S.BEGIN_INTERVAL_TIME >= TS.ST_TM
+  AND    S.END_INTERVAL_TIME   <= TS.EN_TM
+  GROUP BY S.DBID
+)
+SELECT T.OUTPUT 
+FROM   SNAPS N, TABLE(DBMS_WORKLOAD_REPOSITORY.AWR_REPORT_HTML 
+              (
+                l_dbid     => N.DBID,  
+                l_inst_num => '4', 
+                l_bid      => N.MNS, 
+                l_eid      => N.MXS 
+              )
+            ) T
+WHERE N.MNS < N.MXS
+;
+
+
+WITH TS AS
+(
+  SELECT TO_DATE('27/07/2015 09:59:00','DD/MM/YYYY HH24:MI:SS') ST_TM, 
+         TO_DATE('27/07/2015 19:01:00','DD/MM/YYYY HH24:MI:SS') EN_TM
+  FROM   DUAL
+)
+SELECT TO_CHAR(S.BEGIN_TIME,'DD/MM/YYYY HH24:MI') ST_TM, 
+       TO_CHAR(S.END_TIME  ,'DD/MM/YYYY HH24:MI') EN_TM, 
+       S.SNAP_ID,S.INSTANCE_NUMBER, S.METRIC_NAME, S.AVERAGE, S.METRIC_UNIT, S.MAXVAL, S.STANDARD_DEVIATION
+FROM   dba_hist_sysmetric_summary s, TS
+WHERE  metric_name LIKE 'Host CPU Utilization (%)' 
+AND    S.BEGIN_TIME >= TS.ST_TM
+AND    S.END_TIME   <= TS.EN_TM
+ORDER BY SNAP_ID, INSTANCE_NUMBER;

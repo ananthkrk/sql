@@ -1,0 +1,184 @@
+---------------
+-- UNDO RECOVER
+-----------------
+
+select * from gv$fast_start_servers;
+select * from gv$fast_start_transactions;
+
+select inst_id, usn, slt, seq,
+       state,
+       undoblocksdone,
+       undoblockstotal,
+       cputime,
+       round(( (undoblockstotal - undoblocksdone) * cputime ) / (nvl(undoblocksdone,1)), 2) SecsRemaining 
+from   gv$fast_start_transactions
+;
+
+
+--------------------------
+-- CURRENT UNDO ACTIVITY  
+--------------------------
+SELECT VS.INST_ID, VS.SID, VS.SERIAL#,
+       VT.XIDUSN, VT.XIDSLOT, VT.XIDSQN, VT.XID,
+       VT.STATUS, VT.START_TIME, 
+       ROUND((VT.USED_UBLK*P.VALUE)/1024/1024,2) UNDO_MB,
+       VT.USED_UBLK UNDO_BLKS,
+       VT.USED_UREC UNDORECORDS,
+       LKOB.OBJS,
+       VT.UBABLK UNDOBLKNUMBER,
+       VT.UBAFIL UNDOBLKADDRESS,
+       VT.SES_ADDR, 
+       VS.USERNAME, VS.OSUSER, VS.MACHINE,VS.MODULE, VS.ACTION, VS.PROGRAM, 
+       VS.SQL_ADDRESS, VS.SQL_ID, VS.SQL_CHILD_NUMBER, VS.SQL_EXEC_START, VS.SQL_EXEC_ID,
+       VS.PREV_SQL_ID, VS.PREV_CHILD_NUMBER, VS.PREV_EXEC_START, VS.PREV_EXEC_ID,
+       VS.STATE SESSION_STATE
+FROM GV$TRANSACTION VT 
+     INNER JOIN GV$SESSION VS ON VS.SADDR = VT.SES_ADDR AND VS.INST_ID = VT.INST_ID
+     LEFT OUTER JOIN 
+     ( SELECT LO.XIDUSN, LO.XIDSLOT, LO.XIDSQN, 
+              WM_CONCAT(DO.OBJECT_TYPE||'->'||DO.OWNER||'.'||DO.OBJECT_NAME) OBJS,
+              --LISTAGG(DO.OBJECT_TYPE||'->'||DO.OWNER||'.'||DO.OBJECT_NAME,',') WITHIN GROUP (ORDER BY DO.OBJECT_ID) OBJS, 
+              LO.SESSION_ID, LO.ORACLE_USERNAME 
+       FROM   GV$LOCKED_OBJECT  LO INNER JOIN DBA_OBJECTS DO ON DO.OBJECT_ID = LO.OBJECT_ID
+       GROUP BY LO.XIDUSN, LO.XIDSLOT, LO.XIDSQN, LO.SESSION_ID, LO.ORACLE_USERNAME
+     ) LKOB ON LKOB.XIDUSN = VT.XIDUSN AND LKOB.XIDSLOT = VT.XIDSLOT AND LKOB.XIDSQN = VT.XIDSQN
+     INNER JOIN GV$PARAMETER P ON P.NAME = 'db_block_size' AND P.INST_ID = VT.INST_ID
+ORDER BY UNDO_MB DESC;
+
+-----------------------------------------
+-- UNDO UTILIZATION ALLOCATED/FREE PCT
+------------------------------------------
+SELECT D.TABLESPACE_NAME,
+       ROUND(A.MAXBYTES/1024/1024/1024,2)  AS ALLC_GB,
+       ROUND((NVL (F.BYTES, 0) + (A.MAXBYTES - A.BYTES) + (E.ESZ ) ) / 1024/1024/1024, 2)    AS AVBL_GB,
+       ROUND(E.ESZ/1024/1024/1024,2)  AS EXP_GB,
+       ROUND(E.USZ/1024/1024/1024,2)  AS UNEXP_GB,
+       ROUND(E.ASZ/1024/1024/1024,2)  AS ACTIVE_GB,
+       ROUND((NVL (F.BYTES, 0) + (A.MAXBYTES - A.BYTES) + (E.ESZ ) ) * 100 / A.MAXBYTES ,2)  AS FREE_PCT       
+FROM   DBA_TABLESPACES D
+       LEFT OUTER JOIN (  SELECT TABLESPACE_NAME, SUM (BYTES) BYTES, SUM (GREATEST (MAXBYTES, BYTES)) MAXBYTES 
+                          FROM   DBA_DATA_FILES GROUP BY TABLESPACE_NAME 
+                       )  A      ON D.TABLESPACE_NAME = A.TABLESPACE_NAME
+       LEFT OUTER JOIN (  SELECT TABLESPACE_NAME, SUM (BYTES) BYTES  
+                          FROM   DBA_FREE_SPACE GROUP BY TABLESPACE_NAME  
+                       )  F      ON D.TABLESPACE_NAME = F.TABLESPACE_NAME
+       LEFT OUTER JOIN (  SELECT TABLESPACE_NAME, 
+                                 NVL(A_SZ,0) ASZ, NVL(E_SZ,0) ESZ, NVL(U_SZ,0) USZ
+                          FROM   (  SELECT TABLESPACE_NAME, STATUS, SUM(BYTES) AS BYTES
+                                    FROM   DBA_UNDO_EXTENTS
+                                    GROUP  BY TABLESPACE_NAME, STATUS ) 
+                          PIVOT
+                          (
+                            SUM(NVL(BYTES,0)) SZ
+                            FOR STATUS IN ('ACTIVE' AS A,'UNEXPIRED' AS U,'EXPIRED' AS E)
+                          )
+                       )  E ON E.TABLESPACE_NAME = D.TABLESPACE_NAME
+WHERE  D.CONTENTS = 'UNDO'
+ORDER  BY TABLESPACE_NAME;
+
+
+
+-----------------------------------------
+-- 12c UNDO UTILIZATION ALLOCATED/FREE PCT
+------------------------------------------
+SELECT D.TABLESPACE_NAME,
+       ROUND(A.MAXBYTES/1024/1024/1024,2)  AS ALLC_GB,
+       ROUND((NVL (F.BYTES, 0) + (A.MAXBYTES - A.BYTES) + (E.ESZ ) ) / 1024/1024/1024, 2)    AS AVBL_GB,
+       ROUND(E.ESZ/1024/1024/1024,2)  AS EXP_GB,
+      ROUND(E.USZ/1024/1024/1024,2)  AS UNEXP_GB,
+       ROUND(E.ASZ/1024/1024/1024,2)  AS ACTIVE_GB,
+       ROUND((NVL (F.BYTES, 0) + (A.MAXBYTES - A.BYTES) + (E.ESZ ) ) * 100 / A.MAXBYTES ,2)  AS FREE_PCT
+FROM   CDB_TABLESPACES D
+       LEFT OUTER JOIN (  SELECT TABLESPACE_NAME, SUM (BYTES) BYTES, SUM (GREATEST (MAXBYTES, BYTES)) MAXBYTES
+                         FROM   CDB_DATA_FILES GROUP BY TABLESPACE_NAME
+                      )  A      ON D.TABLESPACE_NAME = A.TABLESPACE_NAME
+      LEFT OUTER JOIN (  SELECT TABLESPACE_NAME, SUM (BYTES) BYTES
+                         FROM   CDB_FREE_SPACE GROUP BY TABLESPACE_NAME
+                      )  F      ON D.TABLESPACE_NAME = F.TABLESPACE_NAME
+      LEFT OUTER JOIN (  SELECT TABLESPACE_NAME,
+                                NVL(A_SZ,0) ASZ, NVL(E_SZ,0) ESZ, NVL(U_SZ,0) USZ
+                         FROM   (  SELECT TABLESPACE_NAME, STATUS, SUM(BYTES) AS BYTES
+                                   FROM   CDB_UNDO_EXTENTS
+                                   GROUP  BY TABLESPACE_NAME, STATUS )
+                         PIVOT
+                         (
+                           SUM(NVL(BYTES,0)) SZ
+                           FOR STATUS IN ('ACTIVE' AS A,'UNEXPIRED' AS U,'EXPIRED' AS E)
+                         )
+                      )  E ON E.TABLESPACE_NAME = D.TABLESPACE_NAME
+WHERE  D.CONTENTS = 'UNDO'
+ORDER  BY TABLESPACE_NAME;
+
+------------------------------------
+
+------------------------------------
+
+SELECT * FROM GV$FAST_START_TRANSACTIONS;
+
+
+------------------------------------------
+-- MAX CONCURRENCY (LAST 7 DAYS) 
+------------------------------------------
+SELECT INST_ID, MAX(MAXCONCURRENCY) MX_CONCURRENCY
+FROM   GV$UNDOSTAT
+GROUP  BY INST_ID
+;
+
+SELECT * FROM GV$UNDOSTAT WHERE SSOLDERRCNT > 0;
+
+------------------------------------------
+--  ORA-1555 ERROR (OR) NO SPACE ERROR
+------------------------------------------
+SELECT INST_ID, 
+       MAX(SSOLDERRCNT)   AS "ORA-1555", 
+       MAX(NOSPACEERRCNT) AS "NO_SPACE_ERR"
+FROM   GV$UNDOSTAT
+GROUP  BY INST_ID
+ORDER  BY INST_ID
+;
+
+SELECT *
+FROM   GV$UNDOSTAT
+WHERE  SSOLDERRCNT > 0;
+
+------------------------------------------
+--  SPACE ERRORS 
+------------------------------------------
+SELECT INST_ID, 
+FROM   GV$UNDOSTAT
+GROUP  BY INST_ID
+;
+
+
+SELECT S.INST_ID, S.SID, S.USERNAME, S.PROGRAM, S.STATUS, I.BLOCK_CHANGES 
+FROM   GV$SESSION S, 
+       GV$SESS_IO I 
+WHERE  I.BLOCK_CHANGES!=0 
+AND    S.SID     = I.SID
+AND    S.INST_ID = I.INST_ID
+AND    S.INST_ID = 4 
+ORDER BY BLOCK_CHANGES DESC;
+
+SELECT a.inst_id, a.sid, c.username, c.osuser, c.program, b.name,
+a.value, d.used_urec, d.used_ublk
+FROM gv$sesstat a, v$statname b, gv$session c, gv$transaction d
+WHERE a.statistic# = b.statistic#
+AND a.inst_id = c.inst_id
+AND a.sid = c.sid
+AND c.inst_id = d.inst_id
+AND c.saddr = d.ses_addr
+AND b.name = 'undo change vector size'
+and a.inst_id = 4
+AND a.value > 0
+ORDER BY a.value DESC;
+
+
+SELECT *
+FROM   DBA_UNDO_EXTENTS U
+WHERE  U.STATUS = 'ACTIVE'
+AND    U.TABLESPACE_NAME = 'UNDOTBS2'
+;
+
+
+SELECT * FROM GV$UNDOSTAT WHERE MAXQUERYID = 'fu60k8316bq2s';
+

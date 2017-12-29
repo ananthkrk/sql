@@ -1,0 +1,258 @@
+CREATE OR REPLACE PACKAGE MDXUTILS
+IS
+
+ mdx_dp_dir     VARCHAR2(35) := 'DATA_PUMP_DIR';
+ 
+ procedure dp_exp (piSchema IN VARCHAR2, piTable IN VARCHAR2);
+ procedure dp_imp (piSchema IN VARCHAR2, piTable IN VARCHAR2);
+end;
+/
+
+CREATE OR REPLACE PACKAGE BODY MDXUTILS
+IS
+  h1          NUMBER;                  -- Data Pump job handle
+  v_operation VARCHAR2(35);
+  v_jobname   VARCHAR2(35)      := TO_CHAR(SYSDATE,'YYMMDDHH24MISS');
+  v_jobmode   VARCHAR2(15)      := 'TABLE'  ;
+  
+  mdx_dp_fln     VARCHAR2(35) := 'mdx_dp.dmp';
+  mdx_dp_log     VARCHAR2(35) := 'mdx_dp.log';   
+  
+  type str is table of VARCHAR2(35);
+  
+  c_tbl  str := str();
+  c_sch  str := str();
+  
+  function file_exists(directory_name varchar2, file_name varchar2) 
+  return BOOLEAN 
+  is 
+    v_exists    BOOLEAN; 
+    v_length    NUMBER; 
+    v_blocksize NUMBER; 
+   begin 
+     utl_file.fgetattr(upper(directory_name), file_name, v_exists, v_length, v_blocksize); 
+     if v_exists  then 
+        return TRUE; 
+     else 
+        return FALSE; 
+     end if; 
+   end;
+  
+  procedure cleanup
+  is
+    v_file VARCHAR2(35);
+  begin
+     if file_exists(mdx_dp_dir, mdx_dp_fln) then
+       utl_file.fremove(mdx_dp_dir, mdx_dp_fln);
+     end if;
+     if file_exists(mdx_dp_dir, mdx_dp_log) then
+       utl_file.fremove(mdx_dp_dir, mdx_dp_log);
+     end if;
+  end;
+  
+  procedure csv_tbl(p_str in varchar2, p_sep in VARCHAR2, p_tbl out str) 
+  is
+    idx  PLS_INTEGER;
+    rtx  CLOB;
+    nxt  CLOB;
+    v_tbl str := str();
+  begin
+    rtx := p_str;
+    loop
+      idx := instr(rtx,p_sep);
+      nxt := case when idx > 0 then trim(substr(rtx,1, idx - 1 )) else trim(substr(rtx,1)) end ;
+      rtx := substr(rtx,idx+1);
+      v_tbl.extend;
+      v_tbl(v_tbl.count) := nxt;
+      exit when idx = 0 or rtx is null;  
+    end loop;
+    p_tbl := v_tbl;
+  end;
+  
+  procedure prog(piHandle in NUMBER)
+  is
+    percent_done NUMBER;                   -- Percentage of job complete
+    job_state    VARCHAR2(30);             -- To keep track of job state
+    ind          NUMBER;                   -- Loop index
+    spos         NUMBER;                   -- String starting position
+    slen         NUMBER;                   -- String length for output  
+    le           ku$_LogEntry;             -- For WIP and error messages
+    js           ku$_JobStatus;            -- The job status from get_status
+    jd           ku$_JobDesc;              -- The job description from get_status
+    sts          ku$_Status;               -- The status object returned by get_status
+  begin
+      percent_done  := 0;
+      job_state     := 'UNDEFINED';
+      
+      while (job_state != 'COMPLETED') and (job_state != 'STOPPED')
+      loop
+        dbms_datapump.get_status(piHandle,
+                                 dbms_datapump.ku$_status_job_error  +
+                                 dbms_datapump.ku$_status_job_status +
+                                 dbms_datapump.ku$_status_wip,
+                                 -1,
+                                 job_state,
+                                 sts
+                                 );
+        js := sts.job_status;
+
+        if js.percent_done != percent_done then
+          percent_done := js.percent_done;
+        end if;
+
+
+       if (bitand(sts.mask,dbms_datapump.ku$_status_wip) != 0) then
+          le := sts.wip;
+       else
+          if (bitand(sts.mask,dbms_datapump.ku$_status_job_error) != 0)
+          then
+            le := sts.error;
+          else
+            le := null;
+          end if;
+       end if;
+       if le is not null then
+          ind := le.FIRST;
+          while ind is not null 
+          loop
+            dbms_output.put_line(le(ind).LogText);
+            ind := le.NEXT(ind);
+          end loop;
+        end if;
+      end loop;
+
+      dbms_output.put_line('Job has completed');
+      dbms_output.put_line('Final job state = ' || job_state);
+  EXCEPTION
+    when others then
+      dbms_output.put_line('Exception during Datapump job Progress');
+      
+      dbms_datapump.get_status(piHandle,dbms_datapump.ku$_status_job_error,0, job_state,sts);
+      
+      if (bitand(sts.mask,dbms_datapump.ku$_status_job_error) != 0) then
+        le := sts.error;
+        if le is not null then
+          ind := le.FIRST;
+          while ind is not null 
+          loop
+            spos := 1;
+            slen := length(le(ind).LogText);
+            if slen > 255 then
+              slen := 255;
+            end if;
+            while slen > 0 
+            loop
+              dbms_output.put_line(substr(le(ind).LogText,spos,slen));
+              spos := spos + 255;
+              slen := length(le(ind).LogText) + 1 - spos;
+            end loop;
+            ind := le.NEXT(ind);
+          end loop;
+        end if;
+      end if;
+  end;
+  
+  procedure dp_exp(piSchema in VARCHAR2, piTable in VARCHAR2)
+  is
+    sch_expr VARCHAR2(32765):= NULL;
+    tbl_expr VARCHAR2(32765):= NULL;
+  begin
+      v_operation := 'EXPORT' ;
+      
+      csv_tbl(piSchema,',',c_sch);
+      csv_tbl(piTable ,',',c_tbl);
+      
+      if c_sch.count = 1 then
+        sch_expr := '''' ||c_sch(1)|| '''' ;
+      elsif c_sch.count > 1 then
+        for i in 1..c_sch.count 
+        loop
+          sch_expr := sch_expr || '''' || c_sch(i) ||  '''' || ',';
+        end loop;
+        sch_expr := substr(sch_expr,1, length(sch_expr) -1 );
+      end if;
+      
+      if c_tbl.count = 1 then
+        tbl_expr := '''' ||c_tbl(1)|| '''' ;
+      elsif c_tbl.count > 1 then
+        for i in 1..c_tbl.count 
+        loop
+          tbl_expr := tbl_expr || '''' || c_tbl(i) ||  '''' || ',';
+        end loop;
+        tbl_expr := substr(tbl_expr,1, length(tbl_expr) -1 );
+      end if;
+      
+      h1 := DBMS_DATAPUMP.OPEN
+            (
+              operation => v_operation,
+              job_mode  => v_jobmode,
+              job_name  => v_jobname
+            );
+
+      DBMS_DATAPUMP.ADD_FILE 
+      (
+          handle   =>  h1,
+          filename =>  mdx_dp_fln,
+          directory => mdx_dp_dir,
+          reusefile => 1
+      );
+      DBMS_DATAPUMP.SET_PARAMETER  (h1,'COMPRESSION','ALL');
+      
+      DBMS_DATAPUMP.METADATA_FILTER(h1,'SCHEMA_LIST',sch_expr);
+      DBMS_DATAPUMP.METADATA_FILTER(h1,'NAME_LIST'  ,tbl_expr);
+      
+      DBMS_DATAPUMP.START_JOB(h1);
+      prog(h1);
+      DBMS_DATAPUMP.DETACH(h1);
+  
+  EXCEPTION
+    when others then
+      dbms_output.put_line('Exception in Export Data Pump job');
+      dbms_output.put_line(dbms_utility.format_error_backtrace);
+  end dp_exp;
+  
+  procedure dp_imp(piSchema in VARCHAR2, piTable in VARCHAR2)
+  is
+  begin
+      v_operation := 'IMPORT' ;
+      
+      csv_tbl(piSchema,',',c_sch);
+      csv_tbl(piTable ,',',c_tbl);
+      
+      if c_sch.count > 1 then
+        v_jobmode := 'SCHEMA';
+      else
+        v_jobmode := 'TABLE';
+      end if;      
+      dbms_output.put_line(v_operation);
+      h1 := DBMS_DATAPUMP.OPEN
+            (
+              operation => v_operation,
+              job_mode  => v_jobmode,
+              job_name  => v_jobname
+            ); 
+
+      DBMS_DATAPUMP.ADD_FILE 
+      (
+          handle   =>  h1,
+          filename =>  mdx_dp_fln,
+          directory => mdx_dp_dir
+      );
+      
+      DBMS_DATAPUMP.SET_PARAMETER (h1,'TABLE_EXISTS_ACTION','REPLACE');
+      DBMS_DATAPUMP.START_JOB(h1);
+      prog(h1);
+      DBMS_DATAPUMP.DETACH(h1);
+      cleanup;
+  
+  EXCEPTION
+  
+    when others then
+      dbms_output.put_line('Exception in Import Data Pump job');
+      dbms_output.put_line(dbms_utility.format_error_backtrace);
+  end dp_imp;
+end mdxutils;  
+/
+
+
+GRANT EXECUTE ON MDXUTILS TO ZK1Q4ID;

@@ -1,0 +1,984 @@
+set serveroutput on size unlimited
+set feedback off
+DECLARE
+
+  TYPE t_COLS IS TABLE OF VARCHAR2(250) INDEX BY BINARY_INTEGER;
+  
+  rT_LOG    MASK_LOG%ROWTYPE;
+  L_RUN_TS  TIMESTAMP := SYSTIMESTAMP;
+  
+  nParallel   NUMBER  := 128;
+  
+  type rec is record 
+  (
+     Column_name          varchar2(35),
+     column_id            number,
+     data_type            varchar2(125),
+     table_name           varchar2(35)  
+  );
+  
+  type ddls is table of clob;
+  
+  type cols is table of rec;
+  
+  l_schCount      NUMBER         ;
+  l_tabCount      NUMBER  := 0   ;
+  
+  n_execid        NUMBER         ;
+  
+  tab_ts     VARCHAR2(35);
+  idx_ts     VARCHAR2(35);  
+
+  l_1_stts   TIMESTAMP(6) ;
+  l_1_ents   TIMESTAMP(6) ;
+    
+  l_2_stts   TIMESTAMP(6) ;
+  l_2_ents   TIMESTAMP(6) ;
+
+  l_3_stts   TIMESTAMP(6) ;
+  l_3_ents   TIMESTAMP(6) ;
+
+  l_4_stts   TIMESTAMP(6) ;
+  l_4_ents   TIMESTAMP(6) ;
+
+  l_5_stts   TIMESTAMP(6) ;
+  l_5_ents   TIMESTAMP(6) ;
+
+  l_6_stts   TIMESTAMP(6) ;
+  l_6_ents   TIMESTAMP(6) ;
+
+  l_7_stts   TIMESTAMP(6) ;
+  l_7_ents   TIMESTAMP(6) ;
+
+  l_8_stts   TIMESTAMP(6) ;
+  l_8_ents   TIMESTAMP(6) ;
+
+  l_9_stts   TIMESTAMP(6) ;
+  l_9_ents   TIMESTAMP(6) ;
+  
+  l_min      NUMBER := 0;
+  l_max      NUMBER := 1;
+
+
+  PROCEDURE logExec
+  IS
+  PRAGMA AUTONOMOUS_TRANSACTION;
+  BEGIN
+
+    UPDATE MASK_LOG 
+    SET    ROW = RT_LOG 
+    WHERE  EXECID        = RT_LOG.EXECID
+    AND    EXECSTEP      = RT_LOG.EXECSTEP
+    AND    EXECSTEPDESC  = RT_LOG.EXECSTEPDESC
+    ;
+    
+    IF SQL%ROWCOUNT = 0 THEN
+      INSERT INTO MASK_LOG  VALUES RT_LOG;
+    END IF;
+    COMMIT;
+  END;
+
+  procedure gen_DDLs(piSchema in VARCHAR2, piTab1 in VARCHAR2, piTab2 in VARCHAR2 , po_DDLs OUT ddls)
+  is
+  
+    v_clob          CLOB;
+     
+    altCount        number ;
+    s               number ;
+    e               number ;
+    oraPosition     NUMBER ;
+    
+    cnsStart        NUMBER ;
+    pkyStart        NUMBER ;
+    
+    altSearch       VARCHAR2(65) := 'ALTER TABLE' ;
+    oraSearch       VARCHAR2(05) := 'ORA-'        ;
+    supSearch       VARCHAR2(25) := 'SUPPLEMENTAL LOG'; 
+    pkYSearch       VARCHAR2(25) := 'PRIMARY KEY';
+
+    pkName          VARCHAR2(105);
+    pkStmt          CLOB;
+    str             CLOB;
+    
+    flag            BOOLEAN      := TRUE;
+
+    l_DDLs          DDLs         := DDLs();
+    
+    TYPE obj_array_t IS VARRAY(3) OF VARCHAR2(35);
+    obj_array obj_array_t := obj_array_t('OBJECT_GRANT', 'INDEX', 'TRIGGER');--, 'RLS_POLICY','FGA_POLICY');
+    
+
+    depObjOpenHandle  NUMBER;
+    indexTransHandle  NUMBER;
+    
+    dpndtDDLs         sys.ku$_ddls;
+    dpndtDDL          sys.ku$_ddl;
+    parsedItems       sys.ku$_parsed_items;  
+    
+    vSch  VARCHAR2(35);
+    vVrb  VARCHAR2(35);
+    vOTy  VARCHAR2(35);
+    vNam  VARCHAR2(35);          
+        
+  begin
+  --Make the table2 look like Table1
+  
+    dbms_output.put_line('Start Comparision ... ');
+    dbms_output.put_line('Tab1 -> ' || piSchema || '.' || piTab1);
+    dbms_output.put_line('Tab2 -> ' || piSchema || '.' || piTab2);
+    
+    dbms_output.put_line('Make ' || piSchema || '.' || piTab2 || ' look like ' ||piSchema || '.' || piTab1 ); 
+   
+    dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'SEGMENT_ATTRIBUTES', false);
+    dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'SQLTERMINATOR', false);
+    dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'STORAGE', false);
+    dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'PRETTY', true);
+    dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'TABLESPACE', false);
+    dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'CONSTRAINTS_AS_ALTER', true);
+    dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'DEFAULT', true);
+    
+    v_clob := replace(
+              dbms_metadata_diff.compare_alter(  object_type   => 'TABLE',
+                                                 name1         => piTab2, 
+                                                 name2         => piTab1,
+                                                 schema1       => piSchema,
+                                                 schema2       => piSchema,
+                                                 network_link1 => null,
+                                                 network_link2 => null 
+                                              )
+              ,'"')
+               ;
+                                              
+    altCount :=  REGEXP_COUNT(v_clob,altSearch ,1,'i');
+    
+    for j in 1..altCount
+    loop
+      
+      s    := instr (v_clob,altSearch,1,j);
+      e    := instr (v_clob,altSearch,1,j+1);
+      
+      str  := substr(v_clob,
+                     s, 
+                     case when e > s then e - s - 1 
+                          else length(v_clob) - e 
+                     END
+                    ) ;
+      
+      flag := true;
+      
+      if REGEXP_COUNT(str, oraSearch, 1, 'i' ) > 0 then
+         oraPosition := INSTR(str, oraSearch, 1 );
+         str := substr(str, 1, oraPosition);
+         if REGEXP_COUNT(str,oraSearch,1,'i') > 0 then
+            flag := FALSE; 
+         end if;
+      end if;
+      
+      if REGEXP_COUNT(str,supSearch,1,'i') > 0 then 
+        flag := FALSE; 
+      End If;
+      
+      if REGEXP_COUNT(str,pKYSearch,1,'i') > 0 and flag then 
+        dbms_output.put_line(str);
+        flag := FALSE; 
+        pkStmt := replace(str, piTab2, piTab1 );
+        cnsStart := INSTR (upper(str), 'CONSTRAINT',1) + 10;
+        pkyStart := INSTR (upper(str), 'PRIMARY KEY', 1);
+        pkName   := TRIM(substr (str, cnsStart, (pkyStart - cnsStart)));
+        dbms_output.put_line('Primary Key Name -> '|| pkname);
+      End If;      
+      
+      if flag Then
+        l_DDLs.EXTEND;
+        l_DDLs(l_DDLs.COUNT) := str;
+      end if;
+            
+    end loop;
+    
+    --get dependent DDL's... (like Index, Grants, Trigger, Policies)
+    
+    FOR i IN obj_array.first..obj_array.last
+    LOOP
+      depObjOpenHandle := dbms_metadata.open(obj_array(i));
+
+      dbms_metadata.set_filter(depObjOpenHandle    , 'BASE_OBJECT_SCHEMA'  ,piSchema );
+      dbms_metadata.set_filter(depObjOpenHandle    , 'BASE_OBJECT_NAME'    ,piTab1   );
+      dbms_metadata.set_parse_item(depObjOpenHandle, 'BASE_OBJECT_SCHEMA'            );
+      dbms_metadata.set_parse_item(depObjOpenHandle, 'BASE_OBJECT_NAME'              );
+      dbms_metadata.set_parse_item(depObjOpenHandle, 'BASE_OBJECT_TYPE'              );
+      dbms_metadata.set_parse_item(depObjOpenHandle, 'SCHEMA'                        );    
+      dbms_metadata.set_parse_item(depObjOpenHandle, 'VERB'                          );
+      dbms_metadata.set_parse_item(depObjOpenHandle, 'NAME'                          );
+      dbms_metadata.set_parse_item(depObjOpenHandle, 'OBJECT_TYPE'                   );
+
+
+      if obj_array(i) = 'INDEX' then
+        DBMS_METADATA.SET_FILTER(depObjOpenHandle,'SYSTEM_GENERATED',false);
+      end if;
+
+      indexTransHandle := dbms_metadata.add_transform(depObjOpenHandle, 'DDL');
+
+      dbms_metadata.set_transform_param(indexTransHandle, 'SQLTERMINATOR', FALSE );
+      dbms_metadata.set_transform_param(indexTransHandle, 'PRETTY'       , TRUE  );
+      if obj_array(i) = 'INDEX' then
+        dbms_metadata.set_transform_param(indexTransHandle, 'STORAGE'           , FALSE);
+        dbms_metadata.set_transform_param(indexTransHandle, 'SEGMENT_ATTRIBUTES', FALSE);
+     end if;
+     LOOP
+       dpndtDDLs := dbms_metadata.fetch_ddl(depObjOpenHandle);
+       EXIT WHEN dpndtDDLs IS NULL;
+      
+       for j in dpndtDDLs.first..dpndtDDLs.LAST
+       LOOP
+         dpndtDDL    := dpndtDDLs(j);
+         parsedItems := dpndtDDL.parsedItems;
+         
+         vSch := NULL;
+         vNam := NULL;
+         vVrb := NULL;
+         vOTy := NULL;         
+
+        
+          for m in 1..parsedItems.COUNT
+          loop
+            dbms_output.put_line('Parsed Objects '|| parsedItems(m).item  ||' -> '|| parsedItems(m).value);
+            if parsedItems(m).item = 'SCHEMA' then
+              vSch := parsedItems(m).value;
+            elsif parsedItems(m).item = 'NAME' then
+              vNam := parsedItems(m).value;
+            elsif parsedItems(m).item = 'VERB' then
+              vVrb := parsedItems(m).value;
+            elsif parsedItems(m).item = 'OBJECT_TYPE' then
+              vOTy := parsedItems(m).value;
+            end if;
+          end loop;
+         
+          dbms_output.put_line( vVrb ||' '|| vOTy || ' '|| vSch || '.' || vNam);
+          
+          l_DDLs.EXTEND;
+          l_DDLs(l_DDLs.count) := replace(dpndtDDLs(j).ddltext,'"') || CHR(10);
+         
+          dbms_output.put_line( vVrb ||' '|| vOTy || ' '|| vSch || '.' || vNam || ' ' || piSchema ||'.'|| Trim(pkName) );
+         
+          If vVrb = 'CREATE' and vOTy = 'INDEX' and vSch = piSchema and vNam = Trim(pkName)  Then
+            l_DDLs.EXTEND;
+            l_DDLs(l_DDLs.count) := pkSTMT || CHR(10);
+          End If;         
+        
+        END LOOP;
+      END LOOP;
+
+      dbms_metadata.close(depObjOpenHandle);
+
+    END LOOP;
+    
+    po_DDLs := l_DDLs;
+    
+    dbms_output.put_line('End Comparision ... ');
+  end;
+  
+  
+  function get_index(p_tbl IN cols, p_val in varchar) return pls_integer
+  is
+     i pls_integer := 0;
+   begin
+     i := p_tbl.first;
+     while (i is not null)
+     loop
+       if p_tbl(i).column_name = p_val then
+          return i;
+       end if;
+       i := p_tbl.next(i);
+     end loop;
+     return 0; 
+   end;
+
+
+  PROCEDURE STATS_TBL (PI_OWNER IN VARCHAR2, PI_TABLE in VARCHAR2, piparalleldegree IN NUMBER)
+  IS
+  vstmt  CLOB;
+  BEGIN
+     vstmt := '
+              begin
+                dbms_stats.gather_table_stats
+                (
+                  ownname => '||chr(39)|| PI_OWNER      ||chr(39)    ||',  
+                  tabname => '||chr(39)|| PI_TABLE      ||chr(39)||''||',
+                  degree  => '||piparalleldegree||
+                ');
+              end;';
+    EXECUTE IMMEDIATE vstmt;
+  END STATS_TBL;
+
+
+  PROCEDURE Build_Tbl(piSchema IN VARCHAR2, piTable in VARCHAR2, piColumn in VARCHAR2, piDatatype in VARCHAR2, piStep IN NUMBER, poCTbl OUT VARCHAR2)
+  is
+    v_sql  CLOB;
+    v_idx  CLOB;
+    
+    cObj   VARCHAR2(25);
+    cTbL   VARCHAR2(35);
+    cIDX   VARCHAR2(35);
+    
+    l_rowCount  NUMBER;
+    
+  begin
+  
+             
+    cOBJ :=  TO_CHAR(S_MASK.NEXTVAL);
+    
+    cTBL := 't' || to_char(n_execID) || '_'|| cOBJ;
+    cIDX := 'x' || to_char(n_execID) || '_'|| cOBJ;
+    
+
+    
+    dbms_output.put_line ('Data Type for Column '||piColumn || ' is ' || piDatatype);
+    
+    if piDatatype in ('DATE','TIMESTAMP','TIMESTAMP(3)','TIMESTAMP(6)') then
+        v_sql  :=  ' CREATE TABLE ' ||   cTBL
+                                    || ' PARALLEL ' || to_char(nParallel) 
+                                    || ' NOLOGGING  '
+                                    || ' TABLESPACE ' || tab_ts
+                                    || ' AS '
+                                    || ' SELECT CAST (NULL AS '|| piDataType ||') as Orig_Val, '
+                                    || '        CAST (NULL AS '|| piDataType ||') as New_Val   '
+                                    || ' FROM   DUAL '
+                                    || ' UNION ALL     '
+                                    || q'[
+                                           SELECT /*+ monitor */
+                                                  S.ORIG_VAL,
+                                                  CASE WHEN S.SUBSET = 1 THEN CAST ( TO_DATE(TRUNC(DBMS_RANDOM.VALUE(TO_CHAR(DATE '1945-01-01','J') ,TO_CHAR(DATE '1985-12-31','J') )  ),'J' ) AS ]' || piDataType || q'[)
+                                                  END NEW_VAL
+                                           FROM   (
+                                                    SELECT ROW_NUMBER() OVER(ORDER BY 1) AS RN  , 
+                                                           ORIG_VAL, 
+                                                           SUBSET, 
+                                                           MIN(RID) RID 
+                                                    FROM   ( 
+                                                            SELECT CAST(  ]' || piColumn || q'[  AS ]' || piDataType || q'[) ORIG_VAL, 
+                                                                     ROWID RID, 
+                                                                     1 SUBSET 
+                                                             FROM ]' || piSchema || q'[.]' || piTable || q'[ 
+                                                             ORDER BY DBMS_CRYPTO.RANDOMBYTES(4)  
+                                                           ) 
+                                                    GROUP BY ORIG_VAL , SUBSET 
+                                                  ) S
+                                           WHERE  S.ORIG_VAL IS NOT NULL                                
+                                         ]'
+                   ;
+    else
+        v_sql  :=  ' CREATE TABLE ' ||   cTBL
+                                        || ' PARALLEL ' || to_char(nParallel) 
+                                        || ' NOLOGGING  '
+                                        || ' TABLESPACE ' || tab_ts
+                                        || ' AS '
+                                        || ' SELECT CAST (NULL AS '|| piDataType ||') as Orig_Val, '
+                                        || '        CAST (NULL AS '|| piDataType ||') as New_Val   '
+                                        || ' FROM   DUAL '
+                                        || ' UNION  ALL '
+                                        || q'[
+                                               SELECT /*+ monitor */
+                                                      S.ORIG_VAL,
+                                                      CASE WHEN S.SUBSET = 1 THEN CAST (OEMDM.RD_DUS (RID, ']' || piColumn || q'[', UPPER(ORIG_VAL)) AS ]' || piDataType || q'[)
+                                                      END NEW_VAL
+                                               FROM   (
+                                                        SELECT ROW_NUMBER() OVER(ORDER BY 1) AS RN  , 
+                                                               ORIG_VAL, 
+                                                               SUBSET, 
+                                                               MIN(RID) RID 
+                                                        FROM   ( 
+                                                                SELECT ]' || piColumn || q'[  ORIG_VAL, 
+                                                                         ROWID RID, 
+                                                                         1 SUBSET 
+                                                                 FROM ]' || piSchema || q'[.]' || piTable || q'[ 
+                                                                 ORDER BY DBMS_CRYPTO.RANDOMBYTES(4)  
+                                                               ) 
+                                                        GROUP BY ORIG_VAL , SUBSET 
+                                                      ) S
+                                               WHERE  S.ORIG_VAL IS NOT NULL                                
+                                             ]'
+                       ;    
+    end if;
+    v_idx  := 'CREATE UNIQUE INDEX ' || cIDX || ' ON ' || cTBL || '(orig_val) NOLOGGING TABLESPACE '|| idx_ts ||' PARALLEL ' || nParallel ;
+                 
+    dbms_output.put_line ('Table DDL '||v_sql);
+    dbms_output.put_line ('Index DDL '||v_idx);      
+    
+    begin
+
+      l_6_stts             := SYSTIMESTAMP;
+      rt_log.execStep      := piStep + 0.0001;
+      rt_log.execStepDesc  := piSchema || '.' || piTable || '.' || piColumn || '_CTAS';
+      rt_log.execStepStart := l_6_stts;
+      rt_log.execStepEnd   := NULL;        
+      rt_log.SQLTEXT       := v_SQL;
+      rt_log.Message       := NULL ;          
+      logExec;
+      
+      Execute Immediate v_SQL;
+      l_rowCount          := SQL%ROWCOUNT;
+
+      l_6_ents             := SYSTIMESTAMP;
+      rt_log.execStep      := piStep + 0.0001;
+      rt_log.execStepDesc  := piSchema || '.' || piTable || '.' || piColumn || '_CTAS';
+      rt_log.execStepStart := l_6_stts;
+      rt_log.execStepEnd   := l_6_ents;
+      rt_log.SQLTEXT       := v_SQL;
+      rt_log.Message       := l_rowCount ;   
+      logExec;  
+      
+      l_7_stts             := SYSTIMESTAMP;
+      rt_log.execStep      := piStep + 0.0002;
+      rt_log.execStepDesc  := piSchema || '.' || piTable || '.' || piColumn || '_STATS';
+      rt_log.execStepStart := l_7_stts;
+      rt_log.execStepEnd   := NULL;        
+      rt_log.SQLTEXT       := 'dbms_stats';
+      rt_log.Message       := l_rowCount ;          
+      logExec;
+      
+      STATS_TBL (user, cTBL, nParallel );
+      pocTbl := cTBL;
+
+      l_7_ents             := SYSTIMESTAMP;
+      rt_log.execStep      := piStep + 0.0002;
+      rt_log.execStepDesc  := piSchema || '.' || piTable || '.' || piColumn || '_STATS';
+      rt_log.execStepStart := l_7_stts;
+      rt_log.execStepEnd   := l_7_ents;
+      rt_log.SQLTEXT       := 'dbms_stats';
+      rt_log.Message       := l_rowCount ;   
+      logExec;      
+      
+      begin 
+
+        l_8_stts             := SYSTIMESTAMP;
+        rt_log.execStep      := piStep + 0.0003;
+        rt_log.execStepDesc  := piSchema || '.' || piTable || '.' || piColumn || '_IDX';
+        rt_log.execStepStart := l_8_stts;
+        rt_log.execStepEnd   := NULL;        
+        rt_log.SQLTEXT       := v_idx;
+        rt_log.Message       := l_rowCount ;          
+        logExec;
+              
+        Execute Immediate v_idx;
+        
+        l_8_ents             := SYSTIMESTAMP;
+        rt_log.execStep      := piStep + 0.0003;
+        rt_log.execStepDesc  := piSchema || '.' || piTable || '.' || piColumn || '_IDX';
+        rt_log.execStepStart := l_8_stts;
+        rt_log.execStepEnd   := l_8_ents;
+        rt_log.SQLTEXT       := v_idx;
+        rt_log.Message       := l_rowCount ;
+        logExec;
+                   
+      exception
+        when others then null;
+      end;
+      
+      pocTbl := cTBL;
+    exception
+      when others then 
+         pocTbl := NULL;
+         l_6_ents             := SYSTIMESTAMP;
+         rt_log.execStep      := piStep + 0.0001;
+         rt_log.execStepDesc  := piSchema || '.' || piTable || '.' || piColumn || '_CTAS';
+         rt_log.execStepStart := l_6_stts;
+         rt_log.execStepEnd   := l_6_ents;
+         rt_log.SQLTEXT       := v_SQL;
+         rt_log.Message       := SQLERRM;   
+         logExec;           
+    end;            
+
+  end;
+  
+  PROCEDURE STZ_COLUMN(piSchema IN VARCHAR2, piTable in VARCHAR2)
+  IS
+
+    CURSOR CR_acols IS SELECT  t.column_name, t.column_id,
+                               case when T.data_type  in ('CHAR' , 'VARCHAR2') then  T.DATA_TYPE || CASE WHEN T.CHAR_LENGTH          IS NOT NULL THEN '(' || T.CHAR_LENGTH          || CASE WHEN CHAR_USED = 'B'          THEN NULL ELSE ' CHAR'  END || ')' END 
+                                    when T.data_type  in ('NCHAR','NVARCHAR2') then  T.DATA_TYPE || CASE WHEN T.CHAR_COL_DECL_LENGTH IS NOT NULL THEN '(' || T.CHAR_COL_DECL_LENGTH ||                                                                   ')' END
+                                    when t.data_type  in ('NUMBER', 'FLOAT'  ) then  T.DATA_TYPE || CASE WHEN T.DATA_PRECISION       IS NOT NULL THEN '(' || T.DATA_PRECISION       || CASE WHEN T.DATA_SCALE IS NOT NULL THEN ','|| T.DATA_SCALE END || ')' END
+                                    when t.data_type  in ('DATE','TIMESTAMP','TIMESTAMP(3)','TIMESTAMP(6)') then T.DATA_TYPE 
+                                    when T.data_type  like '%CLOB%'            then  'CLOB'
+                                    else null
+                               end data_type,
+                               null as tabname      
+                       FROM    DBA_TAB_COLumns t 
+                       where   t.owner = piSchema
+                       and     t.table_name = piTable 
+                       order by column_id
+                       ;  
+
+
+    CURSOR CR_scols IS SELECT  t.column_name, t.column_id,
+                               case when T.data_type  in ('CHAR' , 'VARCHAR2') then  T.DATA_TYPE || CASE WHEN T.CHAR_LENGTH          IS NOT NULL THEN '(' || T.CHAR_LENGTH          || CASE WHEN CHAR_USED = 'B'          THEN NULL ELSE ' CHAR'  END || ')' END 
+                                    when T.data_type  in ('NCHAR','NVARCHAR2') then  T.DATA_TYPE || CASE WHEN T.CHAR_COL_DECL_LENGTH IS NOT NULL THEN '(' || T.CHAR_COL_DECL_LENGTH ||                                                                   ')' END
+                                    when t.data_type  in ('NUMBER', 'FLOAT'  ) then  T.DATA_TYPE || CASE WHEN T.DATA_PRECISION       IS NOT NULL THEN '(' || T.DATA_PRECISION       || CASE WHEN T.DATA_SCALE IS NOT NULL THEN ','|| T.DATA_SCALE END || ')' END
+                                    when t.data_type  in ('DATE','TIMESTAMP','TIMESTAMP(3)','TIMESTAMP(6)') then T.DATA_TYPE 
+                                    when T.data_type  like '%CLOB%'            then  'CLOB'
+                                    else null
+                               end data_type,
+                               null as tabname       
+                       FROM    DBA_TAB_COLumns t inner join DBA_SEC_RELEVANT_COLS r on r.object_owner = t.owner and r.object_name = t.table_name and r.sec_rel_column = t.column_name
+                       where   t.owner = piSchema
+                       and     t.table_name = piTable 
+                       order by column_id
+                       ;
+                       
+    CURSOR CR_ncols IS SELECT  t.column_name, t.column_id,
+                               case when T.data_type  in ('CHAR' , 'VARCHAR2') then  T.DATA_TYPE || CASE WHEN T.CHAR_LENGTH          IS NOT NULL THEN '(' || T.CHAR_LENGTH          || CASE WHEN CHAR_USED = 'B'          THEN NULL ELSE ' CHAR'  END || ')' END 
+                                    when T.data_type  in ('NCHAR','NVARCHAR2') then  T.DATA_TYPE || CASE WHEN T.CHAR_COL_DECL_LENGTH IS NOT NULL THEN '(' || T.CHAR_COL_DECL_LENGTH ||                                                                   ')' END
+                                    when t.data_type  in ('NUMBER', 'FLOAT'  ) then  T.DATA_TYPE || CASE WHEN T.DATA_PRECISION       IS NOT NULL THEN '(' || T.DATA_PRECISION       || CASE WHEN T.DATA_SCALE IS NOT NULL THEN ','|| T.DATA_SCALE END || ')' END
+                                    when t.data_type  in ('DATE','TIMESTAMP','TIMESTAMP(3)','TIMESTAMP(6)') then T.DATA_TYPE 
+                                    when T.data_type  like '%CLOB%'            then  'CLOB'
+                                    else null
+                               end data_type,
+                               null as tabname       
+                       FROM    DBA_TAB_COLumns t
+                       where   t.owner = piSchema
+                       and     t.table_name = piTable 
+                       minus
+                       SELECT  t.column_name, t.column_id,
+                               case when T.data_type  in ('CHAR' , 'VARCHAR2') then  T.DATA_TYPE || CASE WHEN T.CHAR_LENGTH          IS NOT NULL THEN '(' || T.CHAR_LENGTH          || CASE WHEN CHAR_USED = 'B'          THEN NULL ELSE ' CHAR'  END || ')' END 
+                                    when T.data_type  in ('NCHAR','NVARCHAR2') then  T.DATA_TYPE || CASE WHEN T.CHAR_COL_DECL_LENGTH IS NOT NULL THEN '(' || T.CHAR_COL_DECL_LENGTH ||                                                                   ')' END
+                                    when t.data_type  in ('NUMBER', 'FLOAT'  ) then  T.DATA_TYPE || CASE WHEN T.DATA_PRECISION       IS NOT NULL THEN '(' || T.DATA_PRECISION       || CASE WHEN T.DATA_SCALE IS NOT NULL THEN ','|| T.DATA_SCALE END || ')' END
+                                    when t.data_type  in ('DATE','TIMESTAMP','TIMESTAMP(3)','TIMESTAMP(6)') then T.DATA_TYPE 
+                                    when T.data_type  like '%CLOB%'            then  'CLOB'
+                                    else null
+                               end data_type,
+                               null as tabname    
+                       FROM    DBA_TAB_COLumns t inner join DBA_SEC_RELEVANT_COLS r on r.object_owner = t.owner and r.object_name = t.table_name and r.sec_rel_column = t.column_name
+                       where   t.owner = piSchema
+                       and     t.table_name = piTable 
+                       order by column_id                       
+                       ;                          
+                     
+    a_cols   cols := cols() ;
+    s_cols   cols := cols() ;
+    n_cols   cols := cols() ;
+    
+    v_ddls   ddls := ddls() ;
+    
+    s_sql    CLOB           ;
+    s_drop   CLOB           ;
+    d_sql    CLOB           ;
+    
+    n_step     NUMBER(5,4)  := 0.0 ;
+    m_tab      VARCHAR2(35) ; 
+    n_rowCount NUMBER       ;
+    p_count    NUMBER       ;
+        
+    l_n_stts   TIMESTAMP(6) ;
+    l_n_ents   TIMESTAMP(6) ;    
+     
+  BEGIN
+  
+    tab_ts := NULL;
+    idx_ts := NULL;
+    
+    tab_ts := case when piSchema like 'MDV%'    then 'VAP_DATA' 
+                   when piSchema like 'MDXHUB%' then 'HUB_DATA'
+                   when piSchema like 'MDXODS%' then 'ODS_DATA' 
+                   else 'MDX_DATA'
+              end;
+              
+    idx_ts := case when piSchema like 'MDV%'    then 'VAP_INDX' 
+                   when piSchema like 'MDXHUB%' then 'HUB_INDX'
+                   when piSchema like 'MDXODS%' then 'ODS_INDX'
+                   else 'MDX_DATA'
+              end;   
+  
+    dbms_output.put_line('Start Table : ' || piSchema || '.' || piTable);
+    
+    STATS_TBL (piSchema, piTable, nParallel );
+    
+    l_4_stts             := SYSTIMESTAMP;
+    rt_log.execStep      := 4;
+    rt_log.execStepDesc  := piSchema || '.' || piTable || '_CURSORS';
+    rt_log.execStepStart := l_4_stts;
+    rt_log.execStepEnd   := NULL;        
+    rt_log.SQLTEXT       := NULL;
+    rt_log.Message       := NULL ;          
+    logExec;
+       
+    open  CR_acols ;
+    fetch CR_acols bulk collect into a_cols;
+    close CR_acols ;
+
+    open  CR_scols ;
+    fetch CR_scols bulk collect into s_cols;
+    close CR_scols ;
+    
+    open  CR_ncols ;
+    fetch CR_ncols bulk collect into n_cols;
+    close CR_ncols ;    
+    
+    dbms_output.put_line('Total         Cols Count: '||  a_cols.COUNT);
+    dbms_output.put_line('Sensitive     Cols Count: '||  s_cols.COUNT);
+    dbms_output.put_line('non Sensitive Cols Count: '||  n_cols.COUNT);
+
+    l_4_ents             := SYSTIMESTAMP;
+    rt_log.execStep      := 4;
+    rt_log.execStepDesc  := piSchema || '.' || piTable || '_CURSORS';
+    rt_log.execStepStart := l_4_stts;
+    rt_log.execStepEnd   := l_4_ents;
+    rt_log.SQLTEXT       := NULL;
+    rt_log.Message       := NULL ;   
+    logExec;  
+    
+    l_5_stts             := SYSTIMESTAMP;
+    rt_log.execStep      := 5;
+    rt_log.execStepDesc  := piSchema || '.' || piTable || '_COLS';
+    rt_log.execStepStart := l_5_stts;
+    rt_log.execStepEnd   := NULL;        
+    rt_log.SQLTEXT       := NULL;
+    rt_log.Message       := NULL;          
+    logExec;       
+    
+    n_step := 5 + 0.0000;
+    
+    if s_cols.count > 0 then
+      for j in 1..s_cols.count
+      loop
+        dbms_output.put_line('Sanitizing Column : ' || s_cols(j).column_name);
+        
+        n_step := n_step + 0.0001;
+        
+        l_n_stts             := SYSTIMESTAMP;
+        rt_log.execStep      := n_step;
+        rt_log.execStepDesc  := piSchema || '.' || piTable || '.' || s_cols(j).column_name;
+        rt_log.execStepStart := l_n_stts;
+        rt_log.execStepEnd   := NULL;        
+        rt_log.SQLTEXT       := NULL;
+        rt_log.Message       := NULL;          
+        logExec;        
+        if s_cols(j).data_type <> 'CLOB' then
+            Build_Tbl( piSchema, 
+                       piTable, 
+                       s_cols(j).column_name, 
+                       s_cols(j).data_type, 
+                       n_step, 
+                       s_cols(j).table_name
+                      );
+        end if;
+
+        l_n_ents             := SYSTIMESTAMP;
+        rt_log.execStep      := n_step;
+        rt_log.execStepDesc  := piSchema || '.' || piTable || '.' || s_cols(j).column_name;
+        rt_log.execStepStart := l_n_stts;
+        rt_log.execStepEnd   := l_n_ents;        
+        rt_log.SQLTEXT       := NULL;
+        rt_log.Message       := NULL;          
+        logExec;        
+        dbms_output.put_line('Column Table : ' || s_cols(j).table_name);
+      end loop;
+      
+      s_sql := NULL;
+      m_tab := case when Length(piTable) > 25 then substr(piTable,1,25) else piTable End || '$MASK';
+        
+      begin
+        s_drop := ' DROP TABLE ' ||piSchema || '.'|| m_tab || ' CASCADE CONSTRAINTS PURGE ';
+        dbms_output.put_line(s_drop);
+        begin
+          EXECUTE immediate s_drop;
+        exception
+          when others then 
+          null;
+        end;
+      exception
+          when others then
+            DBMS_OUTPUT.PUT_LINE(SQLERRM);
+            DBMS_OUTPUT.PUT_LINE(DBMS_UTILITY.FORMAT_ERROR_BACKTRACE);      
+      end;
+        
+ 
+        s_sql := ' CREATE TABLE  ' 
+                 || piSchema || '.'|| m_tab 
+                 || ' PARALLEL '   || nParallel
+                 || ' TABLESPACE ' || tab_ts
+                 || ' AS '
+                 || ' SELECT '
+                 ; 
+        
+        For J in 1..a_cols.COUNT
+        Loop
+          if get_index(s_cols, a_cols(j).column_name) > 0 then
+             if s_cols(get_index(s_cols, a_cols(j).column_name)).data_type <> 'CLOB' then
+               s_sql := s_sql || ' m'||s_cols(get_index(s_cols, a_cols(j).column_name)).column_id || '.new_val as ' || a_cols(j).column_name  || ',' ;
+             else
+               s_sql := s_sql || ' EMPTY_CLOB() AS ' || a_cols(j).column_name  || ',' ;
+             end if;
+          else
+            s_sql := s_sql || ' a.' || a_cols(j).column_name  || ',';
+          end if;
+        END Loop; 
+         
+        s_sql := RTRIM(s_sql,',');
+        s_sql := s_sql || ' FROM ' || piSchema || '.' || piTable || ' a ';
+        
+        for j in 1..s_cols.COUNT
+        loop
+             if s_cols(j).data_type <> 'CLOB' then
+               s_sql := s_sql || ' LEFT OUTER JOIN ' || s_cols(j).table_name || ' m'|| s_cols(j).column_id || ' ON a.' ||a_cols(get_index(a_cols, s_cols(j).column_name)).column_name || ' = m'|| s_cols(j).column_id || '.Orig_val ';
+             end if; 
+        end loop;
+         
+        dbms_output.put_line(s_sql);   
+
+        
+        BEGIN
+        
+          l_6_stts             := SYSTIMESTAMP;
+          rt_log.execStep      := 6;
+          rt_log.execStepDesc  := piSchema || '.'|| m_tab;
+          rt_log.execStepStart := l_6_stts;
+          rt_log.execStepEnd   := NULL;        
+          rt_log.SQLTEXT       := s_SQL;
+          rt_log.Message       := NULL ;          
+          logExec;      
+          
+          Execute Immediate s_SQL;
+          
+          STATS_TBL (piSchema, m_tab, nParallel );
+          
+          n_rowCount           := SQL%ROWCOUNT;
+          l_6_ents             := SYSTIMESTAMP;
+          rt_log.execStep      := 6;
+          rt_log.execStepDesc  := piSchema || '.'|| m_tab;
+          rt_log.execStepStart := l_6_stts;
+          rt_log.execStepEnd   := l_6_ents;        
+          rt_log.SQLTEXT       := s_SQL;
+          rt_log.Message       := n_rowCount;          
+          logExec;
+          
+          -- swap
+          
+          l_7_stts             := SYSTIMESTAMP;
+          rt_log.execStep      := 7;
+          rt_log.execStepDesc  := piSchema || '.'|| m_tab|| '_DDL';
+          rt_log.execStepStart := l_7_stts;
+          rt_log.execStepEnd   := NULL;        
+          rt_log.SQLTEXT       := NULL;
+          rt_log.Message       := NULL ;          
+          logExec;        
+          BEGIN
+            gen_DDLs(piSchema, piTable, m_tab, v_DDLs);
+            
+            l_7_ents             := SYSTIMESTAMP;
+            rt_log.execStep      := 7;
+            rt_log.execStepDesc  := piSchema || '.'|| m_tab|| '_DDL';
+            rt_log.execStepStart := l_7_stts;
+            rt_log.execStepEnd   := l_7_ents;        
+            rt_log.SQLTEXT       := NULL;
+            rt_log.Message       := NULL;          
+            logExec;
+            
+           
+            begin
+              s_drop := ' DROP TABLE ' || piSchema || '.'|| piTable || ' CASCADE CONSTRAINTS PURGE ';
+              begin
+                dbms_output.put_line(s_drop);
+                EXECUTE immediate s_drop;
+              exception
+                when others then
+                  dbms_output.put_line(piSchema || '.'|| piTable || ' does not exist'); 
+              end;
+              s_drop := NULL;
+              
+              for j in 1..v_ddls.COUNT
+              loop
+                begin
+                  dbms_output.put_line('DDL Execution -> '|| v_ddls(j));
+                  execute immediate v_ddls(j);
+                exception 
+                when others then
+                  dbms_output.put_line('DDL Execution, Exception for DDL -> '|| v_ddls(j) || '; with Error, '|| SQLERRM);
+                end;
+              end loop;
+              
+              begin
+                execute immediate 'alter table ' || piSchema || '.'|| piTable || ' noparallel ';
+              exception 
+                when others then 
+                null;
+              end;
+              
+              for j in 1..s_cols.COUNT
+              loop
+                begin
+                    s_drop := NULL;
+                    s_drop := 'drop table ' || s_cols(j).table_name || ' cascade constraints purge ';
+                    dbms_output.put_line(s_drop);
+                    begin
+                    execute immediate s_drop;
+                    exception
+                      when others then
+                      null;
+                    end;
+                end;
+              end loop;    
+            exception
+              when others then 
+                dbms_output.put_line(SQLERRM);
+                dbms_output.put_line(dbms_utility.format_error_backtrace);          
+            end;              
+            
+          EXCEPTION
+            WHen others then
+              l_7_ents             := SYSTIMESTAMP;
+              rt_log.execStep      := 7;
+              rt_log.execStepDesc  := piSchema || '.'|| m_tab|| '_DDL';
+              rt_log.execStepStart := l_7_stts;
+              rt_log.execStepEnd   := l_7_ents;        
+              rt_log.SQLTEXT       := NULL;
+              rt_log.Message       := SQLERRM;          
+              logExec;      
+          END;
+          -- drop Masked temp table ...
+                  
+        Exception
+          when others then
+            l_6_ents             := SYSTIMESTAMP;
+            rt_log.execStep      := 6;
+            rt_log.execStepDesc  := piSchema || '.' || piTable || '_MASK';
+            rt_log.execStepStart := l_6_stts;
+            rt_log.execStepEnd   := l_6_ents;        
+            rt_log.SQLTEXT       := s_SQL;
+            rt_log.Message       := SQLERRM;          
+            logExec;       
+            
+            dbms_output.put_line(SQLERRM);
+            dbms_output.put_line(dbms_utility.format_error_backtrace);
+            
+        END;
+
+
+    end if;
+    
+    l_5_ents             := SYSTIMESTAMP;
+    rt_log.execStep      := 5;
+    rt_log.execStepDesc  := piSchema || '.' || piTable || '_COLS';
+    rt_log.execStepStart := l_5_stts;
+    rt_log.execStepEnd   := l_5_ents;        
+    rt_log.SQLTEXT       := NULL;
+    rt_log.Message       := NULL;          
+    logExec; 
+    
+    --
+
+
+    dbms_output.put_line('End Table : ' || piSchema || '.' || piTable);
+  Exception
+    when others then 
+    dbms_output.put_line(SQLERRM);
+    dbms_output.put_line(dbms_utility.format_error_backtrace);
+  END;
+
+  
+
+  PROCEDURE STZ_SCHEMA(piSchema IN VARCHAR2)
+  IS
+  BEGIN
+
+     
+    FOR i IN ( with 
+                t as
+                (
+                select execstepdesc, max(diff_mins) diff
+                from   mask_runtimes
+                group by execstepdesc
+                )
+                select distinct r.object_name
+                from   t inner join dba_sec_relevant_cols r on r.object_owner || '.' || r.object_name = t.execstepdesc
+                where  t.diff >= l_min
+                and    t.diff <  l_max
+                and    r.object_owner = piSchema
+             )
+    LOOP
+      l_3_stts             := SYSTIMESTAMP;
+      rt_log.execStep      := 3;
+      rt_log.execStepDesc  := piSchema||'.'||i.OBJECT_NAME;
+      rt_log.execStepStart := l_3_stts;
+      rt_log.execStepEnd   := NULL ;
+      rt_log.SQLTEXT       := NULL ;
+      rt_log.Message       := NULL ;    
+      logExec;     
+      STZ_COLUMN(piSchema, i.OBJECT_NAME);
+      l_3_ents             := SYSTIMESTAMP;
+      rt_log.execStep      := 3;
+      rt_log.execStepDesc  := piSchema||'.'||i.OBJECT_NAME;
+      rt_log.execStepStart := l_3_stts;
+      rt_log.execStepEnd   := l_3_ents;
+      rt_log.SQLTEXT       := NULL ;
+      rt_log.Message       := NULL ;   
+      logExec;        
+
+    END LOOP;
+    
+  END;
+
+BEGIN
+    dbms_output.enable(buffer_size => null);
+    dbms_output.put_line('Start');
+    
+    select nvl(max(execid),0) + 1 into n_execID from MASK_LOG;
+    
+    rt_log.execID        := n_execID;
+    
+    l_1_stts             := SYSTIMESTAMP;
+    rt_log.execStep      := 1;
+    rt_log.execStepDesc  := 'BEF_LOOP';
+    rt_log.execStepStart := l_1_stts;
+    rt_log.execStepEnd   := NULL ;
+    rt_log.SQLTEXT       := NULL ;
+    rt_log.Message       := NULL ;
+    logExec;
+    
+    l_schCount  := 0;
+    for ls in ( with 
+                t as
+                (
+                select execstepdesc, max(diff_mins) diff
+                from   mask_runtimes
+                group by execstepdesc
+                )
+                select distinct r.object_owner
+                from   t inner join dba_sec_relevant_cols r on r.object_owner || '.' || r.object_name = t.execstepdesc
+                where  t.diff >= l_min
+                and    t.diff <  l_max
+                and    r.object_owner like 'MDXHUB_TB_RDR%'
+              )
+    loop
+      l_2_stts             :=  SYSTIMESTAMP;
+      rt_log.execStep      := 2;
+      rt_log.execStepDesc  := ls.object_owner;
+      rt_log.execStepStart := l_2_stts;
+      rt_log.execStepEnd   := NULL ;
+      rt_log.SQLTEXT       := NULL ;
+      rt_log.Message       := NULL ;
+      logExec;         
+      STZ_SCHEMA(ls.object_owner);
+      l_2_ents             :=  SYSTIMESTAMP;
+      rt_log.execStep      := 2;
+      rt_log.execStepDesc  := ls.object_owner;
+      rt_log.execStepStart := l_2_stts;
+      rt_log.execStepEnd   := l_2_ents;
+      rt_log.SQLTEXT       := NULL ;
+      rt_log.Message       := NULL ;    
+      logExec;          
+    end loop;
+
+    l_1_ents             := SYSTIMESTAMP;
+    rt_log.execStep      := 1;
+    rt_log.execStepDesc  := 'BEF_LOOP';
+    rt_log.execStepStart := l_1_stts;
+    rt_log.execStepEnd   := l_1_ents;
+    rt_log.SQLTEXT       := NULL ;
+    rt_log.Message        := NULL ;
+    logExec;
+    dbms_output.put_line('Complete');
+EXCEPTION
+  WHEN OTHERS THEN
+    DBMS_OUTPUT.PUT_LINE(SQLERRM);
+    DBMS_OUTPUT.PUT_LINE(DBMS_UTILITY.FORMAT_ERROR_BACKTRACE);
+END ;
+/

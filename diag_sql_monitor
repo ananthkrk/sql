@@ -1,0 +1,352 @@
+--------------------------------------------------------------
+--list all running SQL's in DB
+-------------------------------------------------------------
+SELECT M.INST_ID, M.SQL_ID, M.SQL_EXEC_START, M.SQL_EXEC_ID,
+       ROUND(M.ELAPSED_TIME/1000/1000,2) AS DURATION_SECS,
+       M.KEY, M.USERNAME, 
+       M.PX_SERVERS_ALLOCATED || CASE WHEN M.PX_MAXDOP_INSTANCES IS NOT NULL THEN '('||  M.PX_MAXDOP_INSTANCES ||')' END AS PARALLEL, 
+       M.CPU_TIME,
+       M.MODULE, M.ACTION,
+       LTRIM(M.SQL_TEXT) AS SQLTEXT,
+       M.SERVICE_NAME, M.PROGRAM 
+FROM   GV$SQL_MONITOR M
+WHERE  M.PX_SERVER# IS NULL
+AND    M.STATUS = 'EXECUTING'
+ORDER BY M.LAST_REFRESH_TIME DESC
+;
+
+--------------------------------------------------------------------------------
+-- SQL Monitoring report (using GV$SQL_PLAN_MONITOR & GV$SQL_MONITOR Views)
+--------------------------------------------------------------------------------
+WITH KY AS
+(
+   SELECT DISTINCT 
+          M.SQL_ID, M.SQL_EXEC_ID, M.SQL_EXEC_START
+   FROM   GV$SQL_MONITOR M
+   WHERE  M.SQL_iD like '9ty2r3sn9jccc%'
+   AND    STATUS = 'EXECUTING'
+),
+SM_QC AS
+(
+    SELECT M.KEY, M.INST_ID, M.SID, M.SESSION_SERIAL#, M.STATUS,
+           M.SQL_ID,
+           M.ELAPSED_TIME, M.CPU_TIME,
+           M.PX_IS_CROSS_INSTANCE, M.PX_MAXDOP, M.PX_MAXDOP_INSTANCES, 
+           M.PX_SERVERS_REQUESTED, M.PX_SERVERS_ALLOCATED,
+           PM.PLAN_LINE_iD,
+           PM.PLAN_DEPTH DEPTH,
+           PM.PLAN_OPERATION || CASE WHEN PM.PLAN_OPTIONS IS NOT NULL THEN ' '|| PM.PLAN_OPTIONS END OPERATION,
+           CASE WHEN PM.PLAN_OBJECT_OWNER IS NOT NULL THEN PM.PLAN_OBJECT_OWNER || '.' END || PM.PLAN_OBJECT_NAME OBJECT,
+           PM.PLAN_COST COST,
+           PM.PLAN_CARDINALITY EST_ROWS,
+           NVL(PM.STARTS,0) AS EXECUTIONS,
+           NVL(PM.OUTPUT_ROWS,0) ACT_ROWS,
+           NVL(PM.WORKAREA_MAX_MEM,0)  AS MEMORY,
+           NVL(PM.WORKAREA_MAX_TEMPSEG,0) AS TEMP
+    FROM   KY K,
+           GV$SQL_MONITOR M, 
+           GV$SQL_PLAN_MONITOR PM
+    WHERE  M.SQL_ID  = K.SQL_ID
+    AND    M.SQL_EXEC_ID = K.SQL_EXEC_ID
+    AND    M.SQL_EXEC_START = K.SQL_EXEC_START
+    AND    M.KEY     = PM.KEY
+    AND    M.PX_SERVER# IS NULL    
+    ORDER BY PLAN_LINE_ID
+),
+SM_PX AS
+(
+    SELECT PX_QCINST_ID, PX_QCSID, M.STATUS, 
+           M.SQL_ID, 
+           PM.PLAN_LINE_iD,
+           SUM(NVL(M.ELAPSED_TIME,0)) AS ELAPSED_TIME,
+           SUM(NVL(M.CPU_TIME,0))     AS CPU_TIME,
+           SUM(NVL(PM.STARTS,0))      AS EXECUTIONS,
+           SUM(NVL(PM.OUTPUT_ROWS,0)) AS  ACT_ROWS,
+           SUM(NVL(PM.WORKAREA_MAX_MEM,0))  AS MEMORY,
+           SUM(NVL(PM.WORKAREA_MAX_TEMPSEG,0)) AS TEMP
+    FROM   KY K,
+           GV$SQL_MONITOR M,
+           GV$SQL_PLAN_MONITOR PM
+    WHERE  M.SQL_ID  = K.SQL_ID
+    AND    M.SQL_EXEC_ID = K.SQL_EXEC_ID
+    AND    M.SQL_EXEC_START = K.SQL_EXEC_START
+    AND    M.KEY    = PM.KEY
+    AND    M.PX_SERVER# IS NOT NULL
+    GROUP BY PX_QCINST_ID, PX_QCSID, M.STATUS,
+             M.SQL_ID, 
+             PM.PLAN_LINE_iD
+    ORDER BY PM.PLAN_LINE_ID
+)
+SELECT ROUND((NVL(Q.ELAPSED_TIME,0) + NVL(X.ELAPSED_TIME,0))/1000/1000)        AS ELAPSED_SECS, 
+       ROUND((NVL(Q.CPU_TIME,0) + NVL(Q.CPU_TIME,0)        )/1000/1000)        AS CPU_SECS,
+       q.depth,
+       Q.PLAN_LINE_ID                                                          AS ID, 
+       LPAD(' ',Q.DEPTH) || Q.OPERATION                                        AS OPERATION, 
+       Q.OBJECT                                                                AS NAME,
+       Q.COST                                                                  AS COST,
+       TO_CHAR(Q.EST_ROWS                                  ,'999,999,999,999') AS EST_ROWS,
+       TO_CHAR(( NVL(Q.EXECUTIONS,0) + NVL(X.EXECUTIONS,0)),'999,999,999,999') AS EXECS,
+       TO_CHAR(( NVL(Q.ACT_ROWS  ,0) + NVL(X.ACT_ROWS  ,0)),'999,999,999,999') AS ACT_ROWS,
+       TO_CHAR(( NVL(Q.MEMORY    ,0) + NVL(X.MEMORY    ,0)),'999,999,999,999') AS MEMORY,
+       TO_CHAR(( NVL(Q.TEMP      ,0) + NVL(X.TEMP      ,0)),'999,999,999,999') AS TEMP,
+       Q.INST_ID                                                               AS INST,   
+       Q.SID                                                                   AS SID,  
+       Q.SESSION_SERIAL#                                                       AS SERIAL, 
+       Q.SQL_ID                                                                AS SQL_ID,   
+       Q.PX_SERVERS_ALLOCATED                                                  AS Px,
+       Q.STATUS                                                                AS STATUS
+FROM   SM_QC Q LEFT OUTER JOIN SM_PX X ON Q.SID          = X.PX_QCSID 
+                                      AND Q.INST_ID      = X.PX_QCINST_ID 
+                                      AND Q.PLAN_LINE_ID = X.PLAN_LINE_ID
+ORDER BY Q.PLAN_LINE_ID   
+;
+
+
+--------------------------------------------------
+-- SQLMONITORING FOR XFR JOB USING JOBID and ASH 
+--------------------------------------------------
+WITH 
+J AS
+(
+   SELECT JOBNAME FROM MDXMD_XFR.JOB WHERE JOBID = 109101
+),
+S  AS
+(
+   SELECT INST_ID, SID, SERIAL#, 
+          SQL_ID, SQL_EXEC_ID, SQL_EXEC_START, SQL_CHILD_NUMBER
+   FROM   GV$SESSION S, J
+   WHERE  J.JOBNAME = S.MODULE
+   AND    S.TADDR is NOT NULL
+)
+--SELECT * FROM S; 
+,
+PLN AS
+(
+   SELECT P.INST_ID, S.SID, S.SERIAL#, S.SQL_EXEC_ID, S.SQL_EXEC_START,
+          P.SQL_ID, P.CHILD_NUMBER,
+          P.ID, P.PARENT_ID,
+          LPAD(' ',P.DEPTH) || P.OPERATION  || DECODE(OPTIONS,NULL,'',' (' || OPTIONS || ')') OPERATION, 
+          CASE WHEN P.OBJECT_OWNER IS NOT NULL THEN P.OBJECT_OWNER || '.' END || P.OBJECT_NAME OBJECT,
+          P.COST,
+          P.CARDINALITY
+   FROM   GV$SQL_PLAN P, S
+   WHERE  P.INST_ID      = S.INST_ID
+   AND    P.SQL_ID       = S.SQL_ID
+   AND    P.CHILD_NUMBER = S.SQL_CHILD_NUMBER
+),
+ash_QC AS
+(
+   SELECT H.INST_iD, H.SESSION_iD SID, H.SESSION_SERIAL# SERIAL#,
+          H.SQL_ID, H.SQL_EXEC_iD, H.SQL_EXEC_START, H.SQL_PLAN_LINE_ID, 
+          COUNT(DISTINCT SAMPLE_TIME) TM
+   FROM   GV$ACTIVE_SESSION_HISTORY H, S
+   WHERE  H.INST_ID = S.INST_ID
+   AND    H.SESSION_iD = S.SID
+   AND    H.SESSION_SERIAL# = S.SERIAL#
+   AND    H.SQL_ID = S.SQL_ID
+   AND    H.SQL_EXEC_ID = S.SQL_EXEC_iD
+   AND    H.SQL_EXEC_START = S.SQL_EXEC_START
+   GROUP BY H.INST_iD, H.SESSION_iD, H.SESSION_SERIAL#, 
+            H.SQL_ID, H.SQL_EXEC_iD, H.SQL_EXEC_START, H.SQL_PLAN_LINE_ID
+),
+ASH_PX AS
+(
+   SELECT H.QC_INSTANCE_ID INST_ID, H.QC_SESSION_iD SID, QC_SESSION_SERIAL# SERIAL#,
+          H.SQL_ID, H.SQL_EXEC_iD, H.SQL_EXEC_START, H.SQL_PLAN_LINE_ID, 
+          COUNT(DISTINCT SAMPLE_TIME) TM
+   FROM   GV$ACTIVE_SESSION_HISTORY H, S
+   WHERE  H.QC_INSTANCE_ID = S.INST_ID
+   AND    H.QC_SESSION_iD = S.SID
+   AND    H.QC_SESSION_SERIAL# = S.SERIAL#
+   AND    H.SQL_ID = S.SQL_ID
+   AND    H.SQL_EXEC_ID = S.SQL_EXEC_iD
+   AND    H.SQL_EXEC_START = S.SQL_EXEC_START
+   GROUP BY H.QC_INSTANCE_ID, H.QC_SESSION_iD, H.QC_SESSION_SERIAL#, 
+            H.SQL_ID, H.SQL_EXEC_iD, H.SQL_EXEC_START, H.SQL_PLAN_LINE_ID
+),
+ACT AS
+(
+   SELECT PM.SQL_ID, PM.SQL_EXEC_iD, PM.SQL_EXEC_START, PM.PLAN_LINE_ID,
+          SUM(NVL(PM.STARTS,0))      AS EXECUTIONS,
+          SUM(NVL(PM.OUTPUT_ROWS,0)) AS  ACT_ROWS,
+          SUM(NVL(PM.WORKAREA_MAX_MEM,0))  AS MEMORY,
+          SUM(NVL(PM.WORKAREA_MAX_TEMPSEG,0)) AS TEMP
+   FROM   GV$SQL_PLAN_MONITOR PM 
+          INNER JOIN S ON  PM.SQL_ID         = S.SQL_ID 
+                       AND PM.SQL_EXEC_ID    = S.SQL_EXEC_ID 
+                       AND PM.SQL_EXEC_START = S.SQL_EXEC_START
+   GROUP BY PM.SQL_ID, PM.SQL_EXEC_iD, PM.SQL_EXEC_START,PM.PLAN_LINE_ID
+)
+SELECT P.INST_ID, P.SID, P.SERIAL#, P.SQL_ID, 
+       P.ID,  NVL(Q.TM,0) + NVL(X.TM,0) TM_SECS, 
+       P.OPERATION, P.OBJECT, 
+       P.COST, P.CARDINALITY, 
+       A.EXECUTIONS, A.ACT_ROWS,
+       A.MEMORY, A.TEMP
+FROM   PLN P 
+            INNER JOIN ACT A    ON  P.SQL_ID = A.SQL_ID  AND P.SQL_EXEC_ID = A.SQL_EXEC_iD AND P.SQL_EXEC_START = A.SQL_EXEC_START AND P.ID = A.PLAN_LINE_ID
+       LEFT OUTER JOIN ASH_QC Q ON Q.INST_iD = P.INST_ID AND Q.SID = P.SID AND Q.SERIAL# = P.SERIAL# AND Q.SQL_PLAN_LINE_iD = P.ID AND Q.SQL_EXEC_iD = P.SQL_EXEC_ID AND Q.SQL_EXEC_START = P.SQL_EXEC_START
+       LEFT OUTER JOIN ASH_PX X ON X.INST_iD = P.INST_ID AND X.SID = P.SID AND X.SERIAL# = P.SERIAL# AND X.SQL_PLAN_LINE_iD = P.ID AND X.SQL_EXEC_iD = P.SQL_EXEC_ID AND X.SQL_EXEC_START = P.SQL_EXEC_START 
+;
+
+
+-----------------------------------------------------
+--SQL Monitoring using ASH & SQL Monitoring Views 
+-------------------------------------------------------
+WITH 
+KY  AS
+(
+   SELECT INST_ID, SID, SERIAL#, 
+          SQL_ID, SQL_EXEC_ID, SQL_EXEC_START, SQL_CHILD_NUMBER
+   FROM   GV$SESSION S
+   WHERE  S.SQL_ID = '9ty2r3sn9jccc'
+   AND    S.PROGRAM NOT LIKE '%(P%)%'
+),
+PLN AS
+(
+   SELECT P.INST_ID, S.SID, S.SERIAL#, S.SQL_EXEC_ID, S.SQL_EXEC_START,
+          P.SQL_ID, P.CHILD_NUMBER,
+          P.ID, P.PARENT_ID,
+          LPAD(' ',P.DEPTH) || P.OPERATION  || DECODE(OPTIONS,NULL,'',' (' || OPTIONS || ')') OPERATION, 
+          CASE WHEN P.OBJECT_OWNER IS NOT NULL THEN P.OBJECT_OWNER || '.' END || P.OBJECT_NAME OBJECT,
+          P.COST,
+          P.CARDINALITY
+   FROM   GV$SQL_PLAN P, KY S
+   WHERE  P.INST_ID      = S.INST_ID
+   AND    P.SQL_ID       = S.SQL_ID
+   AND    P.CHILD_NUMBER = S.SQL_CHILD_NUMBER
+),
+ash_QC AS
+(
+   SELECT H.INST_iD, H.SESSION_iD SID, H.SESSION_SERIAL# SERIAL#,
+          H.SQL_ID, H.SQL_EXEC_iD, H.SQL_EXEC_START, H.SQL_PLAN_LINE_ID, 
+          COUNT(DISTINCT SAMPLE_TIME) TM
+   FROM   GV$ACTIVE_SESSION_HISTORY H, KY S
+   WHERE  H.INST_ID          = S.INST_ID
+   AND    H.SESSION_iD       = S.SID
+   AND    H.SESSION_SERIAL#  = S.SERIAL#
+   AND    H.SQL_ID           = S.SQL_ID
+   AND    H.SQL_CHILD_NUMBER = S.SQL_CHILD_NUMBER
+   AND    H.SQL_EXEC_ID      = S.SQL_EXEC_iD
+   AND    H.SQL_EXEC_START   = S.SQL_EXEC_START
+   GROUP BY H.INST_iD, H.SESSION_iD, H.SESSION_SERIAL#, 
+            H.SQL_ID, H.SQL_EXEC_iD, H.SQL_EXEC_START, H.SQL_PLAN_LINE_ID
+),
+ASH_PX AS
+(
+   SELECT H.QC_INSTANCE_ID INST_ID, H.QC_SESSION_iD SID, QC_SESSION_SERIAL# SERIAL#,
+          H.SQL_ID, H.SQL_EXEC_iD, H.SQL_EXEC_START, H.SQL_PLAN_LINE_ID, 
+          COUNT(DISTINCT SAMPLE_TIME) TM
+   FROM   GV$ACTIVE_SESSION_HISTORY H, KY S
+   WHERE  H.QC_INSTANCE_ID = S.INST_ID
+   AND    H.QC_SESSION_iD = S.SID
+   AND    H.QC_SESSION_SERIAL# = S.SERIAL#
+   AND    H.SQL_ID = S.SQL_ID
+   AND    H.SQL_CHILD_NUMBER = S.SQL_CHILD_NUMBER
+   AND    H.SQL_EXEC_ID = S.SQL_EXEC_iD
+   AND    H.SQL_EXEC_START = S.SQL_EXEC_START
+   GROUP BY H.QC_INSTANCE_ID, H.QC_SESSION_iD, H.QC_SESSION_SERIAL#, 
+            H.SQL_ID, H.SQL_EXEC_iD, H.SQL_EXEC_START, H.SQL_PLAN_LINE_ID
+),
+ASH AS
+(
+    SELECT  NVL(Q.SQL_ID          , P.SQL_ID          )  SQL_ID, 
+            NVL(Q.SQL_EXEC_ID     , P.SQL_EXEC_ID     )  SQL_EXEC_ID, 
+            NVL(Q.SQL_EXEC_START  , P.SQL_EXEC_START  )  SQL_EXEC_START,
+            NVL(Q.SQL_PLAN_LINE_ID, P.SQL_PLAN_LINE_ID)  SQL_PLAN_LINE_ID,
+            NVL(Q.TM,0) + NVL(P.TM,0) ASH_TM
+    FROM    ASH_QC Q FULL OUTER JOIN ASH_PX P ON Q.INST_ID = P.INST_ID 
+                                       AND Q.SID = P.SID 
+                                       AND Q.SERIAL# = P.SERIAL# 
+                                       AND Q.SQL_ID = P.SQL_ID 
+                                       AND Q.SQL_EXEC_iD = P.SQL_EXEC_iD 
+                                       AND Q.SQL_EXEC_START = P.SQL_EXEC_START 
+                                       AND Q.SQL_PLAN_LINE_ID = P.SQL_PLAN_LINE_ID
+),
+SM_QC AS
+(
+    SELECT M.KEY, M.INST_ID, M.SID, M.SESSION_SERIAL#, M.STATUS,
+           M.SQL_ID,M.SQL_EXEC_ID, M.SQL_EXEC_START,
+           M.ELAPSED_TIME, M.CPU_TIME,
+           M.PX_IS_CROSS_INSTANCE, M.PX_MAXDOP, M.PX_MAXDOP_INSTANCES, 
+           M.PX_SERVERS_REQUESTED, M.PX_SERVERS_ALLOCATED,
+           PM.PLAN_LINE_iD,
+           PM.PLAN_DEPTH DEPTH,
+           PM.PLAN_OPERATION || CASE WHEN PM.PLAN_OPTIONS IS NOT NULL THEN ' '|| PM.PLAN_OPTIONS END OPERATION,
+           CASE WHEN PM.PLAN_OBJECT_OWNER IS NOT NULL THEN PM.PLAN_OBJECT_OWNER || '.' END || PM.PLAN_OBJECT_NAME OBJECT,
+           PM.PLAN_COST COST,
+           PM.PLAN_CARDINALITY EST_ROWS,
+           NVL(PM.STARTS,0) AS EXECUTIONS,
+           NVL(PM.OUTPUT_ROWS,0) ACT_ROWS,
+           NVL(PM.WORKAREA_MAX_MEM,0)  AS MEMORY,
+           NVL(PM.WORKAREA_MAX_TEMPSEG,0) AS TEMP
+    FROM   KY K,
+           GV$SQL_MONITOR M, 
+           GV$SQL_PLAN_MONITOR PM
+    WHERE  M.SQL_ID  = K.SQL_ID
+    AND    M.SQL_EXEC_ID = K.SQL_EXEC_ID
+    AND    M.SQL_EXEC_START = K.SQL_EXEC_START
+    AND    M.KEY     = PM.KEY
+    AND    M.PX_SERVER# IS NULL
+    AND    M.STATUS = 'EXECUTING'    
+    ORDER BY PLAN_LINE_ID
+),
+SM_PX AS
+(
+    SELECT PX_QCINST_ID ,  
+           PX_QCSID , 
+           M.STATUS, 
+           M.SQL_ID, M.SQL_EXEC_ID, M.SQL_EXEC_START,
+           PM.PLAN_LINE_iD,
+           SUM(NVL(M.ELAPSED_TIME,0)) AS ELAPSED_TIME,
+           SUM(NVL(M.CPU_TIME,0))     AS CPU_TIME,
+           SUM(NVL(PM.STARTS,0))      AS EXECUTIONS,
+           SUM(NVL(PM.OUTPUT_ROWS,0)) AS  ACT_ROWS,
+           SUM(NVL(PM.WORKAREA_MAX_MEM,0))  AS MEMORY,
+           SUM(NVL(PM.WORKAREA_MAX_TEMPSEG,0)) AS TEMP
+    FROM   KY K,
+           GV$SQL_MONITOR      M,
+           GV$SQL_PLAN_MONITOR PM
+    WHERE  M.SQL_ID  = K.SQL_ID
+    AND    M.SQL_EXEC_ID = K.SQL_EXEC_ID
+    AND    M.SQL_EXEC_START = K.SQL_EXEC_START
+    AND    M.KEY    = PM.KEY
+    AND    M.STATUS = 'EXECUTING'
+    AND    M.PX_SERVER# IS NOT NULL
+    GROUP BY PX_QCINST_ID, PX_QCSID, M.STATUS,
+             M.SQL_ID, M.SQL_EXEC_ID, M.SQL_EXEC_START,
+             PM.PLAN_LINE_iD
+    ORDER BY PM.PLAN_LINE_ID
+),
+SM AS
+(
+    SELECT NVL(Q.INST_ID          , X.PX_QCINST_ID    )                INST_ID,
+           NVL(Q.SID              , X.PX_QCSID        )                        SID,
+           NVL(Q.SQL_ID           , X.SQL_ID          )  SQL_ID, 
+           NVL(Q.SQL_EXEC_ID      , X.SQL_EXEC_ID     )  SQL_EXEC_ID, 
+           NVL(Q.SQL_EXEC_START   , X.SQL_EXEC_START  )  SQL_EXEC_START,
+           NVL(Q.PLAN_LINE_ID     , X.PLAN_LINE_ID    )  SQL_PLAN_LINE_ID,
+           NVL(Q.ELAPSED_TIME,0) + NVL(X.ELAPSED_TIME,0) ELAPSED, 
+           NVL(Q.CPU_TIME,0)     + NVL(Q.CPU_TIME,0)     CPU_SECS,
+           NVL(Q.EXECUTIONS,0) + NVL(X.EXECUTIONS,0)  AS EXECS,
+           NVL(Q.ACT_ROWS  ,0) + NVL(X.ACT_ROWS  ,0)  AS ACT_ROWS,
+           NVL(Q.MEMORY    ,0) + NVL(X.MEMORY    ,0)  AS MEMORY,
+           NVL(Q.TEMP      ,0) + NVL(X.TEMP      ,0)  AS TEMP,
+           Q.PX_SERVERS_ALLOCATED                                                  AS Px,
+           Q.STATUS                                                                AS STATUS
+    FROM   SM_QC Q FULL OUTER JOIN SM_PX X ON Q.SID          = X.PX_QCSID 
+                                          AND Q.INST_ID      = X.PX_QCINST_ID 
+                                          AND Q.PLAN_LINE_ID = X.PLAN_LINE_ID
+    ORDER BY Q.PLAN_LINE_ID   
+)
+SELECT P.INST_ID, P.SID, P.SERIAL#, P.SQL_ID, P.CHILD_NUMBER,
+       P.ID,  
+       ASH_TM, 
+       P.OPERATION, P.OBJECT, 
+       P.COST, P.CARDINALITY, 
+       M.EXECS, M.ACT_ROWS,
+       M.MEMORY, M.TEMP
+FROM   PLN P 
+       LEFT OUTER JOIN SM  M ON M.SQL_PLAN_LINE_iD = P.ID AND M.SQL_EXEC_iD = P.SQL_EXEC_ID AND M.SQL_EXEC_START = P.SQL_EXEC_START AND M.INST_iD = P.INST_ID AND M.SID = P.SID 
+       LEFT OUTER JOIN ASH A ON A.SQL_PLAN_LINE_iD = P.ID AND A.SQL_EXEC_iD = P.SQL_EXEC_ID AND A.SQL_EXEC_START = P.SQL_EXEC_START
+;

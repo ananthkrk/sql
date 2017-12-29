@@ -1,0 +1,57 @@
+----------------------
+---  MDX LOCKING INFO 
+----------------------
+
+SELECT * FROM GV$SESSION_BLOCKERS; 
+
+with locks as
+(
+    SELECT s.sid || ','||  s.serial# || ',@' || s.inst_id inst_sid_serial, s.module, s.action,s.sql_id, 
+           t.name, t.id1_tag, t.id2_tag,
+           a.id1, a.id2,
+           case 
+             when t.id1_tag like 'object #' then (select owner||'.'||object_name from dba_objects where object_Id = a.id1 )
+             when t.id1_tag like 'edition obj#' then (select owner||'.'||object_name from dba_objects where object_Id = a.id1 )
+             when t.id1_tag like 'usn<<16 | slot' then to_char(trunc(id1/power(2,16))) || ',' || to_char(bitand(id1,to_number('ffff','xxxx'))+0) || ',' || to_char(id2)
+             else null
+           end INFO,  
+           a.lmode,
+           decode(a.lmode,0,'None',1,'NULL',2,'Row-S(SS)',3,'Row-X(SX)',4,'Share(S)',5,'S/Row-X(SSX)',6,'Exclusive(X)') lock_mode, 
+           a.block, 
+           a.request,
+           decode(a.request,0,'None',1,'NULL',2,'Row-S(SS)',3,'Row-X(SX)',4,'Share(S)',5,'S/Row-X(SSX)',6,'Exclusive(X)') rqst_mode
+    FROM   GV$LOCK a JOIN gv$session   s on a.inst_id = s.inst_id and a.sid  = s.sid
+                     join gv$lock_type t on a.inst_Id = t.inst_id and a.type = t.type
+    --where  (s.username like 'MDX%' OR s.username like 'MDV%')
+),
+blocker as
+(
+    SELECT * from locks a where a.block = 1 
+),
+waiting as
+(
+    select * from locks a where a.request > 0 
+)
+select r.inst_sid_serial blocker, r.module blocker_module, r.action blocker_action, r.sql_id blocker_sql, r.lmode   || ', ' || r.lock_mode blocker_mode, r.info blocker_info,
+       e.inst_sid_serial waiting, e.module waiting_module, e.action waiting_action, e.sql_id waiting_sql, e.request || ', ' || e.rqst_mode waiting_mode
+from   blocker r full outer join waiting e on r.id1 = e.id1 and r.id2 = e.id2  
+order by r.inst_sid_serial, e.inst_sid_serial
+;
+
+
+select * from gv$lock;
+
+select * from gv$lock 
+where 
+(id1,id2,type) in (select id1,id2,type from gv$lock where request>0);
+
+
+
+select a.sid, a.serial#, a.inst_id, c.owner, c.object_name--, LMODE
+from  gv$session a, 
+      gv$locked_object b, 
+      dba_objects c
+where b.object_id = c.object_id 
+and   a.sid = b.session_id
+and   a.inst_id = b.inst_id
+order by a.inst_id, a.sid, a.serial#

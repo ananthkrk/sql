@@ -1,0 +1,36 @@
+set serveroutput on size unlimited
+declare
+ lb_file_exist BOOLEAN := FALSE;
+ ln_size       NUMBER;
+ ln_block_size NUMBER;
+ ln_file_name  VARCHAR2(65) := 'exp_dp_hub_1_32_20160328_1410.dmp';
+ ln_directory  VARCHAR2(35);
+begin
+    for dir in (select directory_name from dba_directories)
+    loop
+        sys.utl_file.fgetattr(dir.directory_name,ln_file_name,lb_file_exist,ln_size,ln_block_size);
+        if lb_file_exist then
+        	ln_directory := dir.directory_name;
+        end if;
+        exit when lb_file_exist;    
+    end loop;
+    if lb_file_exist then
+    	dbms_output.put_line(ln_file_name || ' Exists in ' || ln_directory);
+    else
+    	dbms_output.put_line(ln_file_name || ' Not Exists');
+    end if;
+end;
+/
+
+SET SERVEROUTPUT ON SIZE UNLIMITED
+DECLARE  
+	l_null      varchar2(100);
+	l_directory varchar2(100) := 'MDPD_EXP1';
+BEGIN
+   sys.dbms_backup_restore.searchfiles(l_directory, l_null);
+   FOR x IN (select fname_krbmsft fname from x$krbmsft) 
+   LOOP
+      dbms_output.put_line(x.fname);
+   END LOOP;
+END;
+/

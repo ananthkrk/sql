@@ -1,0 +1,216 @@
+WITH
+AVBL AS
+(
+    SELECT TABLESPACE_NAME, 
+           ROUND(SUM (BYTES)/1024/1024/1024,2) MX_ALLOC_GB,
+           ROUND(SUM (BYTES)/1024/1024/1024,2) ALLOC_GB
+    FROM   DBA_DATA_FILES 
+    GROUP BY TABLESPACE_NAME
+),
+FREE AS
+(
+	SELECT TABLESPACE_NAME, 
+           ROUND(SUM (BYTES)/1024/1024/1024,2) FREE_GB  
+    FROM   DBA_FREE_SPACE 
+    GROUP BY TABLESPACE_NAME
+)
+SELECT D.TABLESPACE_NAME,
+       SUM(MX_ALLOC_GB) MX_ALLOC_GB,
+       SUM(A.ALLOC_GB)     ALLOC_GB,
+       SUM(FREE_GB)        FREE_GB,
+       SUM (MX_ALLOC_GB - ALLOC_GB)  UNALLOC_GB
+FROM   DBA_TABLESPACES D
+       LEFT OUTER JOIN AVBL A ON D.TABLESPACE_NAME = A.TABLESPACE_NAME
+       LEFT OUTER JOIN FREE F ON D.TABLESPACE_NAME = F.TABLESPACE_NAME
+WHERE  D.TABLESPACE_NAME IN ('MDX_DATA','ODS_DATA','HUB_DATA','ODS_INDX','HUB_INDX','MDX_EXEC','VAP_DATA','VAP_INDX','DLT_DATA','DLT_INDX','MDXODS_FDA_TS')
+GROUP BY ROLLUP(D.TABLESPACE_NAME) 
+ORDER BY D.TABLESPACE_NAME NULLS LAST
+;
+
+
+SELECT TABLESPACE_NAME, ROUND(SUM(BYTES)/1024/1024/1024,2) SZ_GB
+FROM   DBA_SEGMENTS
+WHERE  OWNER NOT IN 
+       (
+         'SYS', 'SYSTEM', 'OUTLN', 'DIP','APPQOSSYS','XDB',
+         'ORACLE_OCM', 'DBSNMP','WMSYS','XS$NULL',
+         'EXFSYS','ANONYMOUS','ORDSYS','ORDDATA',
+         'ORDPLUGINS','SI_INFORMTN_SCHEMA',
+         'MDSYS','FLOWS_FILES','APEX_PUBLIC_USER',
+         'APEX_030200','BOA_AUDIT','FOGLIGHT5X','LOGSTDBY_ADMINISTRATOR',
+         'SQLTXPLAIN','SQLTXADMIN','ESMDBA','TOAD','ISHAREABC','IISABCID'
+       )
+GROUP BY TABLESPACE_NAME
+ORDER BY ROUND(SUM(BYTES)/1024/1024,2) DESC;
+
+SELECT S.OWNER, S.SEGMENT_NAME, S.SEGMENT_TYPE, 
+       ROUND(SUM(S.BYTES)/1024/1024/1024, 2) SZ_GB
+FROM   DBA_SEGMENTS S
+WHERE  S.TABLESPACE_NAME IN ('MDX_DATA')
+GROUP BY S.OWNER, S.SEGMENT_NAME, S.SEGMENT_TYPE
+ORDER BY 4 DESC;
+
+SELECT S.OWNER, S.SEGMENT_NAME, S.SEGMENT_TYPE, 
+       T.NUM_ROWS, ROUND(S.BYTES/1024/1024/1024, 2) SZ_GB,
+       T.COMPRESSION, T.COMPRESS_FOR 
+FROM   DBA_SEGMENTS S, DBA_TABLES T
+WHERE  T.TABLE_NAME = S.SEGMENT_NAME
+AND    T.OWNER      = S.OWNER
+AND    T.TABLESPACE_NAME IN ('HUB_DATA')
+--AND    T.OWNER IN ('MDXHUB_TB_LS_MTGLIBP1')
+ORDER BY ROUND(S.BYTES/1024/1024/1024, 2) DESC;
+
+
+SELECT OWNER, SEGMENT_NAME, SEGMENT_TYPE,
+       ROUND(SUM(S.BYTES)/1024/1024, 2) SZ_MB
+FROM   DBA_SEGMENTS S
+WHERE  S.TABLESPACE_NAME = 'MDX_DATA'
+AND    S.OWNER        LIKE 'MDXMD_COM'
+GROUP BY OWNER, SEGMENT_NAME, SEGMENT_TYPE
+ORDER BY SZ_MB desc NULLS LAST;
+
+
+SELECT OWNER, SEGMENT_TYPE,
+       ROUND(SUM(S.BYTES)/1024/1024, 2) SZ_MB
+FROM   DBA_SEGMENTS S
+WHERE  S.TABLESPACE_NAME = 'MDX_DATA'
+AND    S.OWNER LIKE 'MDXLOG_DQ'
+GROUP BY ROLLUP(OWNER, SEGMENT_TYPE)
+;
+
+SELECT OWNER, TABLE_NAME, COLUMN_NAME, SEGMENT_NAME, TABLESPACE_NAME 
+FROM   DBA_LOBS
+WHERE  TABLESPACE_NAME = 'MDX_DATA';
+
+
+
+WITH
+DEP AS
+(
+    SELECT OWNER, TABLE_NAME, NUM_ROWS
+    FROM   DBA_TABLES T
+    WHERE  OWNER IN
+    (
+    'MDXODS_EXEC'
+    )
+),
+TBLS AS
+(
+    SELECT D.OWNER, D.TABLE_NAME, T.TABLESPACE_NAME TBLSPC, 
+           SEGMENT_TYPE OBJ_TYPE,
+           ROUND(NVL(S.BYTES,0)/1024/1024,2) SZ_MB,
+           1 SEQ,
+           NULL MV_SQL
+    FROM   DEP D
+           LEFT OUTER JOIN DBA_TABLES T   ON D.OWNER = T.OWNER AND D.TABLE_NAME = T.TABLE_NAME  
+           LEFT OUTER JOIN DBA_SEGMENTS S ON D.OWNER = S.OWNER AND D.TABLE_NAME = S.SEGMENT_NAME --AND S.SEGMENT_TYPE LIKE 'TABLE%'
+)
+,
+IDXS AS
+(
+    SELECT D.OWNER, D.TABLE_NAME, 
+           I.OWNER INDEX_OWNER, I.INDEX_NAME , 
+           I.TABLESPACE_NAME TBLSPC, 
+           S.SEGMENT_TYPE OBJ_TYPE,
+           ROUND(NVL(S.BYTES,0)/1024/1024,2) SZ_MB,
+           3 SEQ,
+           NULL MV_SQL
+    FROM   DEP D
+           LEFT OUTER JOIN DBA_INDEXES I  ON D.OWNER = I.TABLE_OWNER AND D.TABLE_NAME = I.TABLE_NAME AND I.INDEX_TYPE  = 'NORMAL'
+           LEFT OUTER JOIN DBA_SEGMENTS S ON S.OWNER = I.OWNER AND I.INDEX_NAME = S.SEGMENT_NAME AND S.SEGMENT_TYPE LIKE 'INDEX%'  
+),
+LOBS AS
+(
+    SELECT D.OWNER, D.TABLE_NAME,
+           L.COLUMN_NAME, L.INDEX_NAME,
+           'LOB' OBJ_TYPE,
+           L.SEGMENT_NAME, L.TABLESPACE_NAME TBLSPC,
+           ROUND((NVL(SL.BYTES,0) + NVL(SI.BYTES,0))/1024/1024,2) SZ_MB,
+           2 SEQ,
+           NULL MV_SQL
+    FROM   DEP D
+           LEFT OUTER JOIN DBA_LOBS L ON D.OWNER = L.OWNER AND D.TABLE_NAME = L.TABLE_NAME
+           LEFT OUTER JOIN DBA_SEGMENTS SL ON D.OWNER = SL.OWNER AND L.SEGMENT_NAME = SL.SEGMENT_NAME AND SL.SEGMENT_TYPE = 'LOBSEGMENT'
+           LEFT OUTER JOIN DBA_SEGMENTS SI ON D.OWNER = SI.OWNER AND L.INDEX_NAME   = SI.SEGMENT_NAME AND SL.SEGMENT_TYPE = 'LOBINDEX'         
+),
+DTLS AS
+(
+    SELECT TBLSPC, OWNER, TABLE_NAME,  SEQ, OBJ_TYPE, MV_SQL, SZ_MB FROM TBLS 
+    UNION ALL 
+    SELECT TBLSPC, OWNER, TABLE_NAME,  SEQ, OBJ_TYPE, MV_SQL, SZ_MB FROM IDXS
+    UNION ALL
+    SELECT TBLSPC, OWNER, TABLE_NAME,  SEQ, OBJ_TYPE, MV_SQL, SZ_MB FROM LOBS
+)
+SELECT D.OWNER, D.TABLE_NAME,
+       D.NUM_ROWS,
+       T.SZ_MB TBL_MB,
+       I.SZ_MB IDX_MB,
+       L.SZ_MB LOB_MB,
+       T.SZ_MB + I.SZ_MB + L.SZ_MB TOT_MB
+FROM   DEP D
+       LEFT OUTER JOIN ( SELECT OWNER, TABLE_NAME, 
+                                SUM(NVL(SZ_MB,0)) SZ_MB
+                         FROM   TBLS
+                         GROUP BY OWNER, TABLE_NAME
+                       ) T ON T.OWNER = D.OWNER AND T.TABLE_NAME = D.TABLE_NAME
+       LEFT OUTER JOIN ( SELECT OWNER, TABLE_NAME, 
+                                SUM(NVL(SZ_MB,0)) SZ_MB
+                         FROM   IDXS 
+                         GROUP BY OWNER, TABLE_NAME
+                       ) I   ON I.OWNER = D.OWNER AND I.TABLE_NAME = D.TABLE_NAME
+       LEFT OUTER JOIN ( SELECT OWNER, TABLE_NAME,
+                                 SUM(NVL(SZ_MB,0)) SZ_MB
+                         FROM   LOBS 
+                         GROUP BY OWNER, TABLE_NAME
+                       ) L ON L.OWNER = D.OWNER AND L.TABLE_NAME = D.TABLE_NAME 
+;
+
+SELECT * FROM DBA_RECYCLEBIN;
+
+with info as
+(
+    select file_id, 
+           block_id first_block, 
+           block_id+blocks-1 last_block,
+           bytes, 
+           owner, segment_name
+    from   dba_extents
+    where  tablespace_name = 'MDX_DATA'
+    union all
+    select file_id, 
+           block_id, 
+           block_id+blocks-1, 
+           bytes,
+           'free','free' 
+    from   dba_free_space
+    where  tablespace_name = 'MDX_DATA'
+),
+hwm as
+(
+select file_id, 
+       first_block, last_block, 
+       bytes, 
+       round(sum(bytes) over (partition by file_id order by first_block )/1024/1024/1024,2)  est_wm_gb,
+       owner, segment_name,
+       owner || '.' || segment_name obj
+from   info
+)
+select * from hwm
+--WHERE OWNER <> 'free'
+order by file_id, first_block desc
+;
+
+
+select ceil( (nvl(hwm,1) * p.value )/1024/1024/1024 )  || 'G' Resize
+from   dba_data_files a 
+       left outer join ( select file_id, tablespace_name, max(block_id+blocks-1) hwm 
+                         from   dba_extents
+                         group by file_id, tablespace_name 
+                       ) b  on a.file_id = b.file_id and a.tablespace_name = b.tablespace_name
+       cross join  ( select v.value
+                     from   v$parameter v 
+                     where  v.name = 'db_block_size'
+                   ) p 
+where  a.tablespace_name = 'MDX_DATA'
+and    ceil( blocks*8192/1024/1024) - ceil( (nvl(hwm,1)*8192)/1024/1024 ) > 0;
+--21133
